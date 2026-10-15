@@ -5,8 +5,15 @@ enum SidebarItem: Hashable {
     case device(String)
 }
 
+@MainActor
+@Observable
+final class LogFindFocus {
+    var serial: String?
+}
+
 struct ContentView: View {
     @Environment(DeviceStore.self) private var store
+    @State private var findFocus = LogFindFocus()
     @State private var selection: SidebarItem? = .all
     @State private var exportPickerPresented = false
     @State private var filterInput = ""
@@ -25,6 +32,7 @@ struct ContentView: View {
             Divider()
             statusBar
         }
+        .environment(findFocus)
         .frame(minWidth: 960, minHeight: 560)
         .task {
             if !didLoadFilterDraft {
@@ -303,6 +311,7 @@ struct ContentView: View {
             }
         } else if case .device(let serial) = selection, let device = store.devices.first(where: { $0.serial == serial }) {
             DevicePane(device: device)
+                .onAppear { findFocus.serial = serial }
         } else {
             allDevices
         }
@@ -428,6 +437,14 @@ struct ContentView: View {
 
 private struct DevicePane: View {
     @Environment(DeviceStore.self) private var store
+    @Environment(LogFindFocus.self) private var findFocus
+    @FocusState private var searchFocused: Bool
+    @State private var searchVisible = false
+    @State private var searchText = ""
+    @State private var searchUsesRegex = false
+    @State private var matchCount = 0
+    @State private var matchIndex = 0
+    @State private var searchScrollToken = 0
     let device: Device
 
     var body: some View {
@@ -503,7 +520,25 @@ private struct DevicePane: View {
                 LogTextView(
                     lines: store.logLines(for: device.serial),
                     isLive: store.isLive(device.serial),
-                    onLiveChange: { store.setLive(device.serial, $0) }
+                    onLiveChange: { store.setLive(device.serial, $0) },
+                    searchQuery: searchVisible ? searchText : "",
+                    searchUsesRegex: searchUsesRegex,
+                    searchMatchIndex: matchCount == 0 ? -1 : min(matchIndex, matchCount) - 1,
+                    searchScrollToken: searchScrollToken,
+                    onMatchCount: { count in
+                        guard searchVisible else {
+                            if matchCount != 0 { matchCount = 0 }
+                            return
+                        }
+                        guard count != matchCount else { return }
+                        matchCount = count
+                        if count == 0 {
+                            matchIndex = 0
+                        } else if matchIndex == 0 || matchIndex > count {
+                            matchIndex = min(max(matchIndex, 1), count)
+                        }
+                    },
+                    onBecomeFirstResponder: { findFocus.serial = device.serial }
                 )
                 if store.logLines(for: device.serial).isEmpty {
                     Text(emptyMessage)
@@ -513,8 +548,155 @@ private struct DevicePane: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topTrailing) {
+                if searchVisible {
+                    searchPanel
+                        .padding(.top, 8)
+                        .padding(.trailing, 16)
+                }
+            }
+            .onAppear {
+                if findFocus.serial == nil || !store.devices.contains(where: { $0.serial == findFocus.serial }) {
+                    findFocus.serial = device.serial
+                }
+            }
+            .onChange(of: searchFocused) { _, focused in
+                if focused {
+                    findFocus.serial = device.serial
+                }
+            }
+            .onChange(of: searchText) { _, _ in
+                guard searchVisible else { return }
+                matchIndex = trimmedSearch.isEmpty ? 0 : 1
+                searchScrollToken += 1
+            }
+            .onChange(of: searchUsesRegex) { _, _ in
+                guard searchVisible, !trimmedSearch.isEmpty else { return }
+                matchIndex = 1
+                searchScrollToken += 1
+            }
+            .background {
+                if isFindTarget {
+                    Button(action: toggleSearch) {}
+                        .keyboardShortcut("f", modifiers: .command)
+                        .opacity(0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var searchPanel: some View {
+        HStack(spacing: 6) {
+            TextField("搜索", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .controlSize(.small)
+                .frame(width: 200)
+                .focused($searchFocused)
+                .help(searchUsesRegex ? "正则模式，区分大小写" : "文本模式，不区分大小写")
+                .onSubmit { showNextMatch() }
+            Button {
+                searchUsesRegex.toggle()
+            } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .foregroundStyle(searchUsesRegex ? Color.accentColor : Color.secondary)
+            .help(searchUsesRegex ? "正则模式已开启，区分大小写" : "文本模式。点此改用正则")
+            .accessibilityLabel("正则")
+            findButton("上一个", shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]), action: showPreviousMatch)
+            findButton("下一个", shortcut: KeyboardShortcut("g", modifiers: .command), action: showNextMatch)
+            if !trimmedSearch.isEmpty {
+                if searchRegexInvalid {
+                    Text("正则不合法")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("\(displayedMatchIndex)/\(matchCount)")
+                        .font(.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 40, alignment: .trailing)
+                        .help("当前匹配 / 匹配总数")
+                }
+            }
+            Button {
+                searchVisible = false
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .foregroundStyle(.secondary)
+            .help("关闭搜索")
+            .accessibilityLabel("关闭搜索")
+        }
+        .padding(8)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(.separator)
+        }
+        .shadow(color: .black.opacity(0.16), radius: 8, y: 2)
+    }
+
+    private var trimmedSearch: String {
+        searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var searchRegexInvalid: Bool {
+        guard searchUsesRegex, !trimmedSearch.isEmpty else { return false }
+        return (try? NSRegularExpression(pattern: trimmedSearch)) == nil
+    }
+
+    private func toggleSearch() {
+        findFocus.serial = device.serial
+        searchVisible.toggle()
+        guard searchVisible else { return }
+        if !trimmedSearch.isEmpty {
+            if matchIndex == 0 { matchIndex = 1 }
+            searchScrollToken += 1
+        }
+        DispatchQueue.main.async { searchFocused = true }
+    }
+
+    private var displayedMatchIndex: Int {
+        guard matchCount > 0 else { return 0 }
+        return min(max(matchIndex, 1), matchCount)
+    }
+
+    private var isFindTarget: Bool {
+        findFocus.serial == device.serial
+    }
+
+    private func findButton(_ title: String, shortcut: KeyboardShortcut, action: @escaping () -> Void) -> some View {
+        Group {
+            if isFindTarget {
+                Button(title, action: action)
+                    .keyboardShortcut(shortcut)
+            } else {
+                Button(title, action: action)
+            }
+        }
+        .controlSize(.small)
+        .disabled(matchCount == 0)
+    }
+
+    private func showNextMatch() {
+        guard matchCount > 0 else { return }
+        findFocus.serial = device.serial
+        matchIndex = matchIndex >= matchCount ? 1 : max(matchIndex, 0) + 1
+        searchScrollToken += 1
+    }
+
+    private func showPreviousMatch() {
+        guard matchCount > 0 else { return }
+        findFocus.serial = device.serial
+        matchIndex = matchIndex <= 1 ? matchCount : matchIndex - 1
+        searchScrollToken += 1
     }
 
     private var liveBinding: Binding<Bool> {

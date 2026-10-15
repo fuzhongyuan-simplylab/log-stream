@@ -1,10 +1,36 @@
 import AppKit
 import SwiftUI
 
+enum LogSearch {
+    static func ranges(in text: String, query: String, usesRegex: Bool) -> [NSRange] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty, !text.isEmpty else { return [] }
+        if usesRegex {
+            guard let regex = try? NSRegularExpression(pattern: needle) else { return [] }
+            let full = NSRange(text.startIndex..., in: text)
+            return regex.matches(in: text, range: full).map(\.range).filter { $0.length > 0 }
+        }
+        var ranges: [NSRange] = []
+        var start = text.startIndex
+        while start < text.endIndex,
+              let found = text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive], range: start..<text.endIndex) {
+            ranges.append(NSRange(found, in: text))
+            start = found.upperBound
+        }
+        return ranges
+    }
+}
+
 struct LogTextView: NSViewRepresentable {
     var lines: [String]
     var isLive: Bool
     var onLiveChange: (Bool) -> Void
+    var searchQuery: String
+    var searchUsesRegex: Bool
+    var searchMatchIndex: Int
+    var searchScrollToken: Int
+    var onMatchCount: (Int) -> Void
+    var onBecomeFirstResponder: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -40,6 +66,9 @@ struct LogTextView: NSViewRepresentable {
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
 
+        textView.onBecameFirstResponder = { [weak coordinator = context.coordinator] in
+            coordinator?.onBecomeFirstResponder?()
+        }
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
@@ -59,11 +88,23 @@ struct LogTextView: NSViewRepresentable {
         scrollView.onLiveChange = { [onLiveChange] atBottom in
             onLiveChange(atBottom)
         }
+        if let textView = scrollView.documentView as? LogNSTextView {
+            textView.onBecameFirstResponder = { [onBecomeFirstResponder] in
+                onBecomeFirstResponder()
+            }
+        }
 
         let old = context.coordinator.lines
         let becameLive = isLive && !context.coordinator.wasLive
+        let searchChanged = context.coordinator.query != searchQuery
+            || context.coordinator.usesRegex != searchUsesRegex
+            || context.coordinator.matchIndex != searchMatchIndex
+        let shouldReveal = context.coordinator.scrollToken != searchScrollToken
         context.coordinator.wasLive = isLive
-        guard old != lines || becameLive else {
+        context.coordinator.query = searchQuery
+        context.coordinator.usesRegex = searchUsesRegex
+        context.coordinator.matchIndex = searchMatchIndex
+        guard old != lines || becameLive || searchChanged || shouldReveal else {
             if isLive {
                 scrollView.followLive()
             }
@@ -88,10 +129,22 @@ struct LogTextView: NSViewRepresentable {
         }
 
         scrollView.relayoutText()
+        let matchCount = applySearchHighlights(textView, scrollView: scrollView)
+        if context.coordinator.reportedCount != matchCount {
+            context.coordinator.reportedCount = matchCount
+            let report = onMatchCount
+            DispatchQueue.main.async {
+                report(matchCount)
+            }
+        }
+        if shouldReveal {
+            context.coordinator.scrollToken = searchScrollToken
+            revealCurrentMatch(textView, scrollView: scrollView)
+        }
 
-        if isLive {
+        if isLive, !shouldReveal {
             scrollView.followLive()
-        } else if old != lines, !lines.starts(with: old) {
+        } else if old != lines, !lines.starts(with: old), !shouldReveal {
             scrollView.programmaticScroll = true
             scrollView.contentView.scroll(to: savedOrigin)
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -102,6 +155,12 @@ struct LogTextView: NSViewRepresentable {
     final class Coordinator {
         var lines: [String] = []
         var wasLive = true
+        var query = ""
+        var usesRegex = false
+        var matchIndex = -1
+        var scrollToken = 0
+        var reportedCount = 0
+        var onBecomeFirstResponder: (() -> Void)?
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         var attributes: [NSAttributedString.Key: Any] {
             [
@@ -110,10 +169,48 @@ struct LogTextView: NSViewRepresentable {
             ]
         }
     }
+
+    private func applySearchHighlights(_ textView: NSTextView, scrollView: LogScrollView) -> Int {
+        guard let storage = textView.textStorage else { return 0 }
+        let full = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: full)
+        let ranges = LogSearch.ranges(in: textView.string, query: searchQuery, usesRegex: searchUsesRegex)
+        guard !ranges.isEmpty else { return 0 }
+        let normal = NSColor.systemYellow.withAlphaComponent(0.45)
+        let current = NSColor.systemOrange.withAlphaComponent(0.8)
+        for (index, range) in ranges.enumerated() where range.location != NSNotFound && NSMaxRange(range) <= storage.length {
+            storage.addAttribute(.backgroundColor, value: index == searchMatchIndex ? current : normal, range: range)
+        }
+        scrollView.relayoutText()
+        return ranges.count
+    }
+
+    private func revealCurrentMatch(_ textView: NSTextView, scrollView: LogScrollView) {
+        let ranges = LogSearch.ranges(in: textView.string, query: searchQuery, usesRegex: searchUsesRegex)
+        guard ranges.indices.contains(searchMatchIndex) else { return }
+        scrollView.programmaticScroll = true
+        textView.scrollRangeToVisible(ranges[searchMatchIndex])
+        DispatchQueue.main.async { [weak scrollView] in
+            scrollView?.programmaticScroll = false
+        }
+        if !scrollView.isAtBottom {
+            scrollView.isLive = false
+            onLiveChange(false)
+        }
+    }
 }
 
 final class LogNSTextView: NSTextView {
+    var onBecameFirstResponder: (() -> Void)?
     private var fitting = false
+
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted {
+            onBecameFirstResponder?()
+        }
+        return accepted
+    }
 
     override func setFrameSize(_ newSize: NSSize) {
         var size = newSize
@@ -254,7 +351,7 @@ final class LogScrollView: NSScrollView {
         return document.frame.height > contentView.bounds.height + 1
     }
 
-    private var isAtBottom: Bool {
+    var isAtBottom: Bool {
         distanceFromBottom <= 1
     }
 
