@@ -1,4 +1,4 @@
-# 移动日志
+# Logstream
 
 macOS 上的 Android 和 iOS 日志查看工具。可以发现已连接的模拟器和真机，实时显示日志，并支持按文本或正则过滤、暂停、清空和导出。
 
@@ -31,11 +31,11 @@ swift build -c release
 ./scripts/build-app.sh
 ```
 
-生成 `dist/移动日志.app`。脚本会做 release 构建、组装应用包并做临时签名。
+生成 `dist/Logstream.app`。脚本会做 release 构建、组装应用包并做临时签名。
 
 **安装**：
 
 ```sh
-cp -R "dist/移动日志.app" /Applications/
-open "/Applications/移动日志.app"
+cp -R "dist/Logstream.app" /Applications/
+open "/Applications/Logstream.app"
 ```

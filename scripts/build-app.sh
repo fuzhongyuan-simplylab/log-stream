@@ -4,7 +4,7 @@ cd "$(dirname "$0")/.."
 
 swift build -c release
 
-APP="dist/移动日志.app"
+APP="dist/Logstream.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
 cp ".build/release/MobileLogTools" "$APP/Contents/MacOS/MobileLogTools"

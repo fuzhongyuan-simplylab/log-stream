@@ -275,7 +275,7 @@ struct ContentView: View {
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
-        .navigationTitle("移动日志")
+        .navigationTitle("Logstream")
     }
 
     private func listHeader(

@@ -7,7 +7,7 @@ struct MobileLogToolsApp: App {
     @State private var store = DeviceStore()
 
     var body: some Scene {
-        Window("移动日志", id: "main") {
+        Window("Logstream", id: "main") {
             ContentView()
                 .environment(store)
                 .onAppear {

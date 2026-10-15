@@ -11,9 +11,9 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>移动日志</string>
+	<string>Logstream</string>
 	<key>CFBundleDisplayName</key>
-	<string>移动日志</string>
+	<string>Logstream</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

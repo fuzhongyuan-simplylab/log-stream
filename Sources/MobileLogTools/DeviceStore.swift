@@ -391,7 +391,7 @@ final class DeviceStore {
     func combinedExportFileName() -> String {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        return "移动日志-\(formatter.string(from: Date())).txt"
+        return "Logstream-\(formatter.string(from: Date())).txt"
     }
 
     func noteExport(_ message: String) {
