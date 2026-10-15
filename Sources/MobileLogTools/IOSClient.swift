@@ -21,14 +21,7 @@ enum IOSClient {
         guard result.status == 0 else {
             throw IOSClientError.commandFailed(failureMessage(result, fallback: "无法列出 iOS 设备"))
         }
-        let parsed = parseDevices(Data(result.stdout.utf8))
-        let reachable = IOSDeviceLogStream.reachableUDIDs()
-        return parsed.map { device in
-            guard !device.isEmulator, reachable.contains(device.serial) else { return device }
-            var online = device
-            online.state = "device"
-            return online
-        }
+        return parseDevices(Data(result.stdout.utf8))
     }
 
     static func listApps(udid: String) async throws -> [InstalledApp] {
@@ -156,9 +149,12 @@ enum IOSClient {
         let tunnelState = string(connection["tunnelState"])
         let bootState = string(info["bootState"])
         let transport = string(connection["transportType"])
-        let connected = connectionState == "connected" || tunnelState == "connected" || (isSimulator && bootState == "booted")
-        if isSimulator && !connected {
-            return nil
+        if isSimulator {
+            guard bootState == "booted" || connectionState == "connected" else { return nil }
+        } else {
+            let wired = transport == "wired"
+            let connected = connectionState == "connected" || tunnelState == "connected"
+            guard wired && connected else { return nil }
         }
         let marketing = string(hardware["marketingName"])
         let name = string(info["name"])
@@ -168,13 +164,12 @@ enum IOSClient {
         return Device(
             platform: .ios,
             serial: udid,
-            state: connected ? "device" : "offline",
+            state: "device",
             name: displayName,
             androidVersion: version.isEmpty ? "未知" : version,
             apiLevel: "",
             isEmulator: isSimulator,
-            productType: product,
-            transport: transport
+            productType: product
         )
     }
 

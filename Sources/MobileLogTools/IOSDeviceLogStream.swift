@@ -9,7 +9,7 @@ enum IOSLogError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .deviceUnavailable:
-            return "设备连不上。请用数据线连接，或打开无线调试并在设备上信任这台 Mac"
+            return "设备连不上。请用数据线连接，并在设备上信任这台 Mac"
         case .streamFailed:
             return "无法开始读取日志"
         }
@@ -182,26 +182,6 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         if !lines.isEmpty {
             onLines(lines)
         }
-    }
-
-    static func reachableUDIDs() -> Set<String> {
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice", RTLD_NOW),
-              let listSymbol = dlsym(handle, "AMDCreateDeviceList"),
-              let identifierSymbol = dlsym(handle, "AMDeviceCopyDeviceIdentifier") else {
-            return []
-        }
-        typealias ListFn = @convention(c) () -> Unmanaged<CFArray>?
-        typealias CopyIDFn = @convention(c) (UnsafeMutableRawPointer) -> Unmanaged<CFString>?
-        guard let devices = unsafeBitCast(listSymbol, to: ListFn.self)()?.takeRetainedValue() else { return [] }
-        let copyID = unsafeBitCast(identifierSymbol, to: CopyIDFn.self)
-        var identifiers: Set<String> = []
-        for case let device as NSObject in devices as NSArray {
-            let pointer = Unmanaged.passUnretained(device).toOpaque()
-            if let identifier = copyID(pointer)?.takeRetainedValue() as String? {
-                identifiers.insert(identifier)
-            }
-        }
-        return identifiers
     }
 
     static func userApps(udid: String) -> [InstalledApp]? {

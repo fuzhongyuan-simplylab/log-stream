@@ -28,7 +28,6 @@ struct Device: Identifiable, Hashable, Sendable {
     var apiLevel: String
     var isEmulator: Bool
     var productType: String = ""
-    var transport: String = ""
 
     var isOnline: Bool { state == "device" }
 
@@ -55,22 +54,6 @@ struct Device: Identifiable, Hashable, Sendable {
         case .ios:
             return "iOS \(androidVersion)"
         }
-    }
-
-    var connectionLabel: String {
-        guard platform == .ios, !isEmulator else { return "" }
-        switch transport {
-        case "localNetwork":
-            return "无线"
-        case "wired":
-            return "数据线"
-        default:
-            return ""
-        }
-    }
-
-    var caption: String {
-        connectionLabel.isEmpty ? versionLabel : "\(versionLabel) · \(connectionLabel)"
     }
 
     var stateLabel: String {

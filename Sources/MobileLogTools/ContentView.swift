@@ -297,7 +297,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name)
                     .lineLimit(1)
-                Text(device.caption)
+                Text(device.versionLabel)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !device.isOnline {
@@ -348,7 +348,7 @@ struct ContentView: View {
                 if otherCount > 0 {
                     Text("这边没有 \(store.platform.title) 设备。\(otherPlatform.title) 有 \(otherCount) 台。")
                 } else if store.platform == .ios {
-                    Text("启动模拟器，或用数据线、无线调试连上 iPhone、iPad，然后点刷新设备。")
+                    Text("启动模拟器，或用数据线连上 iPhone、iPad，然后点刷新设备。")
                 } else {
                     Text("启动模拟器或接上真机后，点刷新设备。")
                 }
@@ -366,34 +366,15 @@ struct ContentView: View {
         } else if case .device(let serial) = selection, let device = store.visibleDevices.first(where: { $0.serial == serial }) {
             DevicePane(device: device)
                 .onAppear { findFocus.serial = serial }
-        } else if store.platform == .ios && boardPhones.isEmpty && boardEmulators.isEmpty {
-            ContentUnavailableView {
-                Label("没有可显示的日志", systemImage: "rectangle.split.3x1")
-            } description: {
-                Text("在侧边栏打开一台在线设备，并选择应用后，日志会显示在这里。")
-            }
         } else {
             allDevices
         }
     }
 
-    private var boardPhones: [Device] {
-        store.physicalDevices.filter(showsOnAllDevices)
-    }
-
-    private var boardEmulators: [Device] {
-        store.emulators.filter(showsOnAllDevices)
-    }
-
-    private func showsOnAllDevices(_ device: Device) -> Bool {
-        guard device.platform == .ios else { return true }
-        return device.isOnline && !store.selectedBundleIDs(for: device.serial).isEmpty
-    }
-
     private var allDevices: some View {
         @Bindable var store = store
-        let phones = boardPhones
-        let emulators = boardEmulators
+        let phones = store.physicalDevices
+        let emulators = store.emulators
         let devices = phones + emulators
         return GeometryReader { geo in
             let dividerWidth: CGFloat = 1
@@ -583,7 +564,7 @@ private struct DevicePane: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("·")
-                    Text(device.caption)
+                    Text(device.versionLabel)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     if device.isOnline {
