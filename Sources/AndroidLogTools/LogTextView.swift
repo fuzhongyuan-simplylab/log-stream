@@ -13,7 +13,7 @@ struct LogTextView: NSViewRepresentable {
     func makeNSView(context: Context) -> NSScrollView {
         context.coordinator.lines = []
         let scrollView = LogScrollView()
-        let textView = NSTextView()
+        let textView = LogNSTextView()
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = false
@@ -47,6 +47,8 @@ struct LogTextView: NSViewRepresentable {
         scrollView.drawsBackground = true
         scrollView.backgroundColor = .textBackgroundColor
         scrollView.borderType = .noBorder
+        scrollView.automaticallyAdjustsContentInsets = false
+        scrollView.contentInsets = NSEdgeInsets()
         return scrollView
     }
 
@@ -85,10 +87,7 @@ struct LogTextView: NSViewRepresentable {
             context.coordinator.lines = lines
         }
 
-        let width = scrollView.contentSize.width
-        if width > 1, abs(textView.frame.width - width) > 1 {
-            textView.frame.size.width = width
-        }
+        scrollView.relayoutText()
 
         if isLive {
             scrollView.followLive()
@@ -113,11 +112,38 @@ struct LogTextView: NSViewRepresentable {
     }
 }
 
+final class LogNSTextView: NSTextView {
+    private var fitting = false
+
+    override func setFrameSize(_ newSize: NSSize) {
+        var size = newSize
+        if !fitting {
+            fitting = true
+            let fitted = fittedHeight
+            fitting = false
+            if fitted > size.height {
+                size.height = fitted
+            }
+        }
+        super.setFrameSize(size)
+    }
+
+    var fittedHeight: CGFloat {
+        guard let layoutManager, let textContainer else { return frame.height }
+        layoutManager.ensureLayout(for: textContainer)
+        let used = layoutManager.usedRect(for: textContainer)
+        let inset = textContainerInset.height
+        guard used.height > 0 || (string as NSString).length > 0 else { return frame.height }
+        return ceil(inset + used.maxY + inset) + 4
+    }
+}
+
 final class LogScrollView: NSScrollView {
     var isLive = false
     var programmaticScroll = false
     var onLiveChange: ((Bool) -> Void)?
     private var userScrolling = false
+    private var fittingText = false
     private var followedSize: NSSize = .zero
 
     override func viewDidMoveToWindow() {
@@ -131,6 +157,8 @@ final class LogScrollView: NSScrollView {
 
     override func layout() {
         super.layout()
+        guard !fittingText else { return }
+        relayoutText()
         let size = contentView.bounds.size
         let changed = abs(size.width - followedSize.width) > 0.5 || abs(size.height - followedSize.height) > 0.5
         guard changed else { return }
@@ -164,19 +192,34 @@ final class LogScrollView: NSScrollView {
         }
     }
 
-    private func pinToBottom() {
-        guard let textView = documentView as? NSTextView else { return }
-        programmaticScroll = true
-        if let container = textView.textContainer {
-            textView.layoutManager?.ensureLayout(for: container)
+    func relayoutText() {
+        guard !fittingText,
+              let textView = documentView as? LogNSTextView,
+              let layoutManager = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        let width = contentSize.width
+        guard width > 1 else { return }
+        fittingText = true
+        defer { fittingText = false }
+
+        if abs(textView.frame.width - width) > 0.5 {
+            textView.setFrameSize(NSSize(width: width, height: textView.frame.height))
         }
-        let length = (textView.string as NSString).length
-        textView.scrollRangeToVisible(NSRange(location: length, length: 0))
+        layoutManager.ensureLayout(for: container)
+        let height = textView.fittedHeight
+        guard height > 1, abs(textView.frame.height - height) > 0.5 else { return }
+        textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+    }
+
+    private func pinToBottom() {
+        guard let textView = documentView as? LogNSTextView else { return }
+        programmaticScroll = true
+        relayoutText()
         let contentHeight = textView.frame.height
         let visibleHeight = contentView.bounds.height
         if contentHeight > visibleHeight + 1 {
             var origin = contentView.bounds.origin
-            origin.y = contentHeight - visibleHeight
+            origin.y = max(0, contentHeight - visibleHeight)
             contentView.scroll(to: origin)
             reflectScrolledClipView(contentView)
         }

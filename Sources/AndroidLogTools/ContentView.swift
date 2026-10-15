@@ -21,11 +21,10 @@ struct ContentView: View {
             } detail: {
                 detail
             }
-        }
-        .frame(minWidth: 960, minHeight: 560)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Divider()
             statusBar
         }
+        .frame(minWidth: 960, minHeight: 560)
         .task {
             await store.start()
         }
@@ -320,7 +319,8 @@ struct ContentView: View {
 
     private func deviceColumns(_ devices: [Device]) -> some View {
         GeometryReader { geo in
-            let width = max(320, geo.size.width / CGFloat(max(devices.count, 1)))
+            let dividers = CGFloat(max(devices.count - 1, 0))
+            let width = max(320, (geo.size.width - dividers) / CGFloat(max(devices.count, 1)))
             ScrollView(.horizontal) {
                 HStack(alignment: .top, spacing: 0) {
                     ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
