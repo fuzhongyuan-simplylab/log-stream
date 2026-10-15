@@ -21,6 +21,7 @@ final class DeviceStore {
     private(set) var isRefreshing = false
     private(set) var adbMissing = false
     private(set) var errorMessage: String?
+    private(set) var exportNotice: String?
     private(set) var adbPath = ""
 
     private var lines: [String: [String]] = [:]
@@ -113,6 +114,7 @@ final class DeviceStore {
         guard !isRefreshing else { return }
         isRefreshing = true
         errorMessage = nil
+        exportNotice = nil
         defer { isRefreshing = false }
 
         do {
@@ -230,6 +232,65 @@ final class DeviceStore {
 
     func logLines(for serial: String) -> [String] {
         lines[serial] ?? []
+    }
+
+    func exportText(for devices: [Device]) -> String {
+        devices.map { exportSection($0) }.joined(separator: "\n\n========\n\n")
+    }
+
+    func exportFileName(for device: Device) -> String {
+        "\(Self.safeFileName(device.name))-\(Self.safeFileName(device.serial)).txt"
+    }
+
+    func combinedExportFileName() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return "Android日志-\(formatter.string(from: Date())).txt"
+    }
+
+    func noteExport(_ message: String) {
+        exportNotice = message
+        errorMessage = nil
+    }
+
+    func reportExportFailure(_ message: String) {
+        errorMessage = message
+        exportNotice = nil
+    }
+
+    private func exportSection(_ device: Device) -> String {
+        let exportedLines = logLines(for: device.serial)
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        let status: String
+        if !device.isOnline {
+            status = device.stateLabel
+        } else if isPaused(device.serial) {
+            status = "已暂停"
+        } else {
+            status = "记录中"
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        let body = exportedLines.isEmpty ? "（暂无日志）" : exportedLines.joined(separator: "\n")
+        return """
+        设备: \(device.name)
+        类型: \(device.kindLabel)
+        序列号: \(device.serial)
+        系统: \(device.versionLabel)
+        状态: \(status)
+        过滤: \(needle.isEmpty ? "（无）" : needle)
+        导出时间: \(formatter.string(from: Date()))
+        日志行数: \(exportedLines.count)
+
+        \(body)
+        """
+    }
+
+    private static func safeFileName(_ value: String) -> String {
+        let forbidden = CharacterSet(charactersIn: "/\\:?%*|\"<>\n\r")
+        let cleaned = String(value.unicodeScalars.map { forbidden.contains($0) ? "_" : Character($0) })
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "device" : cleaned
     }
 
     func lineCount(for serial: String) -> Int {

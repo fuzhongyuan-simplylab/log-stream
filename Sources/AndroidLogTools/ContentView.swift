@@ -8,6 +8,7 @@ enum SidebarItem: Hashable {
 struct ContentView: View {
     @Environment(DeviceStore.self) private var store
     @State private var selection: SidebarItem? = .all
+    @State private var exportPickerPresented = false
 
     var body: some View {
         @Bindable var store = store
@@ -36,6 +37,9 @@ struct ContentView: View {
             if !store.devices.contains(where: { $0.serial == serial }) {
                 selection = .all
             }
+        }
+        .sheet(isPresented: $exportPickerPresented) {
+            ExportLogSheet(devices: store.emulators + store.physicalDevices)
         }
     }
 
@@ -76,9 +80,23 @@ struct ContentView: View {
             .keyboardShortcut(.delete, modifiers: [.command, .shift])
             .disabled(!store.hasOnlineDevice)
             .help("清空所有在线设备的 logcat 缓冲")
+            exportToolbarButton
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    @ViewBuilder
+    private var exportToolbarButton: some View {
+        if store.devices.count == 1, let device = store.devices.first {
+            SingleDeviceExportMenu(device: device)
+        } else {
+            Button("导出") {
+                exportPickerPresented = true
+            }
+            .disabled(store.devices.isEmpty)
+            .help("勾选设备后导出日志和设备信息")
+        }
     }
 
     private var sidebar: some View {
@@ -301,6 +319,13 @@ struct ContentView: View {
                 .lineLimit(1)
                 .help(store.adbPath)
             Spacer()
+            if let exportNotice = store.exportNotice, !exportNotice.isEmpty {
+                Text(exportNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(exportNotice)
+            }
             if let errorMessage = store.errorMessage, !errorMessage.isEmpty {
                 Text(errorMessage)
                     .font(.caption)
@@ -330,6 +355,7 @@ private struct DevicePane: View {
                         .font(.headline)
                         .lineLimit(1)
                     Spacer(minLength: 8)
+                    SingleDeviceExportMenu(device: device, compact: true)
                     Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
                         Task { await store.toggleRecording(serial: device.serial) }
                     }
