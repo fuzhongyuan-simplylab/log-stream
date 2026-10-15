@@ -118,26 +118,26 @@ final class IOSDeviceLogStream: @unchecked Sendable {
     }
 
     private func format(_ event: NSObject, allowed: Set<String>, includeDebug: Bool) -> String? {
-        if let date = event.value(forKey: "timestamp") as? Date, date < cutoff {
+        if let date = field(event, "timestamp") as? Date, date < cutoff {
             return nil
         }
-        let process = event.value(forKey: "process") as? String ?? ""
+        let process = field(event, "process") as? String ?? ""
         guard allowed.contains(process) else { return nil }
-        if !includeDebug, (event.value(forKey: "messageType") as? NSNumber)?.intValue == 2 {
+        if !includeDebug, (field(event, "messageType") as? NSNumber)?.intValue == 2 {
             return nil
         }
-        guard let message = event.value(forKey: "eventMessage") as? String else { return nil }
+        guard let message = field(event, "eventMessage") as? String else { return nil }
         let text = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
         let stamp: String
-        if let date = event.value(forKey: "timestamp") as? Date {
+        if let date = field(event, "timestamp") as? Date {
             stamp = formatter.string(from: date)
         } else {
             stamp = ""
         }
-        let pid = (event.value(forKey: "processID") as? NSNumber)?.intValue
-        let subsystem = event.value(forKey: "subsystem") as? String ?? ""
-        let category = event.value(forKey: "category") as? String ?? ""
+        let pid = (field(event, "processID") as? NSNumber)?.intValue
+        let subsystem = field(event, "subsystem") as? String ?? ""
+        let category = field(event, "category") as? String ?? ""
         var line = stamp.isEmpty ? process : "\(stamp) \(process)"
         if let pid {
             line += "[\(pid)]"
@@ -150,6 +150,14 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         }
         line += ": \(text)"
         return line
+    }
+
+    /// `value(forKey:)` raises when the key is missing, and that exception aborts the process.
+    /// Log lines are `OSActivityLogMessageEvent`; opening, closing, or using the app also emits
+    /// activity events that share `process` / `eventMessage` but have no `subsystem` or `category`.
+    private func field(_ event: NSObject, _ key: String) -> Any? {
+        guard event.responds(to: NSSelectorFromString(key)) else { return nil }
+        return event.value(forKey: key)
     }
 
     private func enqueue(_ lines: [String]) {
