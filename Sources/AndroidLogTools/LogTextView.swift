@@ -184,10 +184,10 @@ final class LogScrollView: NSScrollView {
     }
 
     func followLive() {
-        guard isLive, !userScrolling, !programmaticScroll, !isNearBottom else { return }
+        guard isLive, !userScrolling, !programmaticScroll, !isAtBottom else { return }
         pinToBottom()
         DispatchQueue.main.async { [weak self] in
-            guard let self, self.isLive, !self.userScrolling, !self.programmaticScroll, !self.isNearBottom else { return }
+            guard let self, self.isLive, !self.userScrolling, !self.programmaticScroll, !self.isAtBottom else { return }
             self.pinToBottom()
         }
     }
@@ -236,8 +236,14 @@ final class LogScrollView: NSScrollView {
     private var isUserScrollEvent: Bool {
         guard let event = NSApp.currentEvent else { return false }
         switch event.type {
-        case .leftMouseDragged, .leftMouseDown, .scrollWheel, .keyDown:
+        case .scrollWheel:
             return true
+        case .leftMouseDown, .leftMouseDragged:
+            let point = convert(event.locationInWindow, from: nil)
+            return hitTest(point) is NSScroller
+        case .keyDown:
+            let responder = window?.firstResponder
+            return responder === self || responder === documentView
         default:
             return false
         }
@@ -248,11 +254,19 @@ final class LogScrollView: NSScrollView {
         return document.frame.height > contentView.bounds.height + 1
     }
 
+    private var isAtBottom: Bool {
+        distanceFromBottom <= 1
+    }
+
     private var isNearBottom: Bool {
-        guard let document = documentView else { return true }
+        distanceFromBottom <= 8
+    }
+
+    private var distanceFromBottom: CGFloat {
+        guard let document = documentView else { return 0 }
         let visible = contentView.bounds
         let height = document.frame.height
-        if height <= visible.height + 1 { return true }
-        return visible.maxY >= height - 8
+        if height <= visible.height + 1 { return 0 }
+        return height - visible.maxY
     }
 }

@@ -565,7 +565,7 @@ final class LogStream: @unchecked Sendable {
         pending.removeAll()
         flushScheduled = false
         lock.unlock()
-        if !lines.isEmpty {
+        if shouldNotify, !lines.isEmpty {
             onLines(lines)
         }
         if shouldNotify {
@@ -575,6 +575,10 @@ final class LogStream: @unchecked Sendable {
 
     private func consume(_ data: Data) {
         lock.lock()
+        guard !stopped else {
+            lock.unlock()
+            return
+        }
         leftover.append(data)
         while let newline = leftover.firstIndex(of: 0x0A) {
             let lineData = leftover.subdata(in: 0..<newline)
@@ -601,9 +605,14 @@ final class LogStream: @unchecked Sendable {
 
     private func flush() {
         lock.lock()
+        flushScheduled = false
+        guard !stopped else {
+            pending.removeAll()
+            lock.unlock()
+            return
+        }
         let lines = pending
         pending.removeAll()
-        flushScheduled = false
         lock.unlock()
         if !lines.isEmpty {
             onLines(lines)
