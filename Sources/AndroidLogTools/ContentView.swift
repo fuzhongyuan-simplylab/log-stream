@@ -54,6 +54,16 @@ struct ContentView: View {
                 .controlSize(.small)
             }
             Spacer(minLength: 12)
+            Button("全部开始") {
+                Task { await store.startAll() }
+            }
+            .disabled(!store.canStartAll)
+            .help("开始所有已暂停的在线设备")
+            Button("全部暂停") {
+                store.pauseAll()
+            }
+            .disabled(!store.canPauseAll)
+            .help("暂停所有正在记录的在线设备。已有日志保留，暂停期间的日志不会补上")
             Button("刷新设备") {
                 Task { await store.refresh() }
             }
@@ -148,12 +158,20 @@ struct ContentView: View {
                     Text(device.stateLabel)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if store.isPaused(device.serial) {
+                    Text("已暂停")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         } icon: {
             Image(systemName: device.symbolName)
         }
         .contextMenu {
+            Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
+                Task { await store.toggleRecording(serial: device.serial) }
+            }
+            .disabled(!device.isOnline)
             Button("清空日志") {
                 Task { await store.clearLogs(serial: device.serial) }
             }
@@ -312,6 +330,12 @@ private struct DevicePane: View {
                         .font(.headline)
                         .lineLimit(1)
                     Spacer(minLength: 8)
+                    Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
+                        Task { await store.toggleRecording(serial: device.serial) }
+                    }
+                    .controlSize(.small)
+                    .disabled(!device.isOnline)
+                    .help(store.isPaused(device.serial) ? "从现在开始记录，暂停期间的日志不会补上" : "停止追加新日志，已有内容保留")
                     Button("清空日志") {
                         Task { await store.clearLogs(serial: device.serial) }
                     }
@@ -328,6 +352,9 @@ private struct DevicePane: View {
                     Text(device.versionLabel)
                         .lineLimit(1)
                     Spacer(minLength: 8)
+                    if device.isOnline {
+                        Text(store.isPaused(device.serial) ? "已暂停" : "记录中")
+                    }
                     Text("\(store.lineCount(for: device.serial)) 行")
                         .monospacedDigit()
                 }
@@ -369,6 +396,9 @@ private struct DevicePane: View {
         let needle = store.filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if !needle.isEmpty {
             return "没有匹配「\(needle)」的日志"
+        }
+        if store.isPaused(device.serial) {
+            return "已暂停"
         }
         return "等待日志…"
     }

@@ -28,6 +28,9 @@ final class DeviceStore {
     private var streamWarnings: [String: String] = [:]
     private var streams: [String: LogStream] = [:]
     private var intentionalStop: Set<String> = []
+    private var paused: Set<String> = []
+    private var startedSerials: Set<String> = []
+    private var starting: Set<String> = []
     private var client: AdbClient?
     private var didStart = false
 
@@ -60,6 +63,18 @@ final class DeviceStore {
 
     var hasOnlineDevice: Bool {
         devices.contains(where: \.isOnline)
+    }
+
+    var canStartAll: Bool {
+        devices.contains { $0.isOnline && paused.contains($0.serial) }
+    }
+
+    var canPauseAll: Bool {
+        devices.contains { $0.isOnline && !paused.contains($0.serial) }
+    }
+
+    func isPaused(_ serial: String) -> Bool {
+        paused.contains(serial)
     }
 
     var summaryText: String {
@@ -111,10 +126,13 @@ final class DeviceStore {
                 raw[serial] = nil
                 streamWarnings[serial] = nil
             }
+            startedSerials = startedSerials.intersection(foundIDs)
             devices = found
             for device in found {
-                if device.isOnline {
-                    startStream(for: device)
+                if device.isOnline && !paused.contains(device.serial) {
+                    let fromNow = startedSerials.contains(device.serial)
+                    startedSerials.insert(device.serial)
+                    await startStream(for: device, fromNow: fromNow)
                 } else {
                     stopStream(serial: device.serial, intentional: true)
                 }
@@ -184,6 +202,26 @@ final class DeviceStore {
         }
     }
 
+    func toggleRecording(serial: String) async {
+        if paused.contains(serial) {
+            await startRecording(serial: serial)
+        } else {
+            pauseRecording(serial: serial)
+        }
+    }
+
+    func startAll() async {
+        for device in devices where device.isOnline && paused.contains(device.serial) {
+            await startRecording(serial: device.serial)
+        }
+    }
+
+    func pauseAll() {
+        for device in devices where device.isOnline && !paused.contains(device.serial) {
+            pauseRecording(serial: device.serial)
+        }
+    }
+
     func stopAllStreams() {
         for serial in Array(streams.keys) {
             stopStream(serial: serial, intentional: true)
@@ -210,8 +248,21 @@ final class DeviceStore {
         }
     }
 
+    private func startRecording(serial: String) async {
+        guard let device = devices.first(where: { $0.serial == serial }), device.isOnline else { return }
+        paused.remove(serial)
+        startedSerials.insert(serial)
+        await startStream(for: device, fromNow: true)
+    }
+
+    private func pauseRecording(serial: String) {
+        paused.insert(serial)
+        streams[serial]?.discardPending()
+        stopStream(serial: serial, intentional: true)
+    }
+
     private func append(serial: String, newLines: [String]) {
-        guard !newLines.isEmpty else { return }
+        guard !paused.contains(serial), !newLines.isEmpty else { return }
         var buffer = raw[serial] ?? []
         buffer.append(contentsOf: newLines)
         if buffer.count > Self.rawLimit + Self.rawSlack {
@@ -234,9 +285,20 @@ final class DeviceStore {
         }
     }
 
-    private func startStream(for device: Device) {
-        guard let client, device.isOnline, streams[device.serial] == nil else { return }
+    private func startStream(for device: Device, fromNow: Bool) async {
+        guard let client, device.isOnline else { return }
         let serial = device.serial
+        guard streams[serial] == nil, !starting.contains(serial), !paused.contains(serial) else { return }
+        starting.insert(serial)
+        defer { starting.remove(serial) }
+
+        let since: String? = if fromNow {
+            await client.deviceTimestamp(serial: serial) ?? "1"
+        } else {
+            nil
+        }
+        guard streams[serial] == nil, !paused.contains(serial) else { return }
+
         streamWarnings[serial] = nil
         let stream = LogStream(
             onLines: { [weak self] lines in
@@ -251,7 +313,11 @@ final class DeviceStore {
             }
         )
         do {
-            try stream.start(adbPath: client.path, serial: serial)
+            try stream.start(adbPath: client.path, serial: serial, since: since)
+            guard !paused.contains(serial) else {
+                stream.stop()
+                return
+            }
             streams[serial] = stream
         } catch {
             errorMessage = "无法读取 \(device.name) 的日志：\(error.localizedDescription)"

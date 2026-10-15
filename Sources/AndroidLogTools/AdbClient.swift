@@ -224,6 +224,20 @@ final class AdbClient: Sendable {
         }
     }
 
+    func deviceTimestamp(serial: String) async -> String? {
+        guard let result = try? await run(
+            ["-s", serial, "shell", "date '+%m-%d %H:%M:%S.000'"],
+            timeout: 5
+        ), result.status == 0 else {
+            return nil
+        }
+        let stamp = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard stamp.range(of: #"^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        return stamp
+    }
+
     func run(_ arguments: [String], timeout: TimeInterval) async throws -> ShellOutput {
         let path = self.path
         return try await withCheckedThrowingContinuation { continuation in
@@ -503,9 +517,9 @@ final class LogStream: @unchecked Sendable {
         self.onEnd = onEnd
     }
 
-    func start(adbPath: String, serial: String) throws {
+    func start(adbPath: String, serial: String, since: String?) throws {
         process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["-s", serial, "logcat", "-v", "time", "-T", "300"]
+        process.arguments = ["-s", serial, "logcat", "-v", "time", "-T", since ?? "300"]
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice
