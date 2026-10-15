@@ -59,6 +59,7 @@ final class DeviceStore {
     private var client: AdbClient?
     private var didStart = false
     private var appliedLogcatExpression: String?
+    private var filterRegex: NSRegularExpression?
     private var filterGeneration = 0
 
     private static let filterKey = "logFilter"
@@ -93,6 +94,7 @@ final class DeviceStore {
             includeDebug = stored
         }
         appliedLogcatExpression = LogcatFilter.expression(for: filter, usesRegex: filterUsesRegex)
+        filterRegex = Self.compiledFilter(filter, usesRegex: filterUsesRegex)
     }
 
     var visibleDevices: [Device] {
@@ -254,6 +256,7 @@ final class DeviceStore {
         UserDefaults.standard.set(filter, forKey: Self.filterKey)
         UserDefaults.standard.set(filterUsesRegex, forKey: Self.filterRegexKey)
         appliedLogcatExpression = expression
+        filterRegex = Self.compiledFilter(filter, usesRegex: usesRegex)
         filterGeneration += 1
         for device in visibleDevices {
             lines[device.serial] = []
@@ -702,11 +705,18 @@ final class DeviceStore {
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if needle.isEmpty { return true }
         if filterUsesRegex {
-            guard let regex = try? NSRegularExpression(pattern: needle) else { return false }
+            guard let filterRegex else { return false }
             let range = NSRange(line.startIndex..., in: line)
-            return regex.firstMatch(in: line, range: range) != nil
+            return filterRegex.firstMatch(in: line, range: range) != nil
         }
         return line.localizedCaseInsensitiveContains(needle)
+    }
+
+    private static func compiledFilter(_ filter: String, usesRegex: Bool) -> NSRegularExpression? {
+        guard usesRegex else { return nil }
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        return try? NSRegularExpression(pattern: needle)
     }
 }
 
