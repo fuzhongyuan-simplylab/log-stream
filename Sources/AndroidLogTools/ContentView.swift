@@ -538,7 +538,17 @@ private struct DevicePane: View {
                             matchIndex = min(max(matchIndex, 1), count)
                         }
                     },
-                    onBecomeFirstResponder: { findFocus.serial = device.serial }
+                    onBecomeFirstResponder: { findFocus.serial = device.serial },
+                    onSelectMatch: { index in
+                        findFocus.serial = device.serial
+                        matchIndex = index + 1
+                        searchScrollToken += 1
+                    },
+                    onHighlightMatch: { index in
+                        let number = index + 1
+                        guard number != matchIndex else { return }
+                        matchIndex = number
+                    }
                 )
                 if store.logLines(for: device.serial).isEmpty {
                     Text(emptyMessage)
@@ -607,8 +617,18 @@ private struct DevicePane: View {
             .foregroundStyle(searchUsesRegex ? Color.accentColor : Color.secondary)
             .help(searchUsesRegex ? "正则模式已开启，区分大小写" : "文本模式。点此改用正则")
             .accessibilityLabel("正则")
-            findButton("上一个", shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]), action: showPreviousMatch)
-            findButton("下一个", shortcut: KeyboardShortcut("g", modifiers: .command), action: showNextMatch)
+            findButton(
+                "上一个",
+                shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]),
+                help: "跳到当前选中匹配的上一条",
+                action: showPreviousMatch
+            )
+            findButton(
+                "下一个",
+                shortcut: KeyboardShortcut("g", modifiers: .command),
+                help: "跳到当前选中匹配的下一条",
+                action: showNextMatch
+            )
             if !trimmedSearch.isEmpty {
                 if searchRegexInvalid {
                     Text("正则不合法")
@@ -672,13 +692,20 @@ private struct DevicePane: View {
         findFocus.serial == device.serial
     }
 
-    private func findButton(_ title: String, shortcut: KeyboardShortcut, action: @escaping () -> Void) -> some View {
+    private func findButton(
+        _ title: String,
+        shortcut: KeyboardShortcut,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
         Group {
             if isFindTarget {
                 Button(title, action: action)
                     .keyboardShortcut(shortcut)
+                    .help(help)
             } else {
                 Button(title, action: action)
+                    .help(help)
             }
         }
         .controlSize(.small)
