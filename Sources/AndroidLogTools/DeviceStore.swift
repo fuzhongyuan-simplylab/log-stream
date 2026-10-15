@@ -43,8 +43,8 @@ final class DeviceStore {
     private static let physicalSortAscendingKey = "physicalSortAscending"
     private static let rawLimit = 20_000
     private static let rawSlack = 2_000
-    private static let shownLimit = 2_000
-    private static let shownSlack = 400
+    private static let shownLimit = 10_000
+    private static let shownSlack = 100
 
     init() {
         let defaults = UserDefaults.standard
