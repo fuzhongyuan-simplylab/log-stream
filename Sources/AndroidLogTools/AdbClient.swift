@@ -502,9 +502,10 @@ final class AdbClient: Sendable {
 }
 
 enum LogcatFilter {
-    static func expression(for filter: String) -> String? {
+    static func expression(for filter: String, usesRegex: Bool) -> String? {
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return nil }
+        if usesRegex { return needle }
         var pattern = ""
         for scalar in needle.unicodeScalars {
             guard scalar.isASCII, let ascii = ASCII(scalar.value) else {
@@ -518,6 +519,13 @@ enum LogcatFilter {
             }
         }
         return pattern
+    }
+
+    static func isValid(_ filter: String, usesRegex: Bool) -> Bool {
+        guard usesRegex else { return true }
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return true }
+        return (try? NSRegularExpression(pattern: needle)) != nil
     }
 
     private static func escaped(_ scalar: Unicode.Scalar) -> String {

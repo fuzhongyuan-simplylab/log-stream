@@ -6,6 +6,7 @@ import Observation
 final class DeviceStore {
     private(set) var devices: [Device] = []
     var filter: String
+    var filterUsesRegex: Bool
     var emulatorSortField: DeviceSortField {
         didSet { UserDefaults.standard.set(emulatorSortField.rawValue, forKey: Self.emulatorSortFieldKey) }
     }
@@ -36,9 +37,9 @@ final class DeviceStore {
     private var didStart = false
     private var appliedLogcatExpression: String?
     private var filterGeneration = 0
-    private var filterApplyTask: Task<Void, Never>?
 
     private static let filterKey = "logFilter"
+    private static let filterRegexKey = "logFilterUsesRegex"
     private static let emulatorSortFieldKey = "emulatorSortField"
     private static let emulatorSortAscendingKey = "emulatorSortAscending"
     private static let physicalSortFieldKey = "physicalSortField"
@@ -49,11 +50,12 @@ final class DeviceStore {
     init() {
         let defaults = UserDefaults.standard
         filter = defaults.string(forKey: Self.filterKey) ?? ""
+        filterUsesRegex = defaults.bool(forKey: Self.filterRegexKey)
         emulatorSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.emulatorSortFieldKey) ?? "") ?? .connection
         emulatorSortAscending = defaults.object(forKey: Self.emulatorSortAscendingKey) as? Bool ?? true
         physicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.physicalSortFieldKey) ?? "") ?? .name
         physicalSortAscending = defaults.object(forKey: Self.physicalSortAscendingKey) as? Bool ?? true
-        appliedLogcatExpression = LogcatFilter.expression(for: filter)
+        appliedLogcatExpression = LogcatFilter.expression(for: filter, usesRegex: filterUsesRegex)
     }
 
     var emulators: [Device] {
@@ -175,13 +177,26 @@ final class DeviceStore {
         }
     }
 
-    func filterDidChange() {
+    func applyFilter(_ text: String, usesRegex: Bool) async {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard LogcatFilter.isValid(trimmed, usesRegex: usesRegex) else { return }
+        let expression = LogcatFilter.expression(for: trimmed, usesRegex: usesRegex)
+        let unchanged = trimmed == filter.trimmingCharacters(in: .whitespacesAndNewlines)
+            && (trimmed.isEmpty || usesRegex == filterUsesRegex)
+        guard !unchanged else { return }
+        filter = trimmed
+        filterUsesRegex = usesRegex
         UserDefaults.standard.set(filter, forKey: Self.filterKey)
-        filterApplyTask?.cancel()
-        filterApplyTask = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 400_000_000)
-            guard !Task.isCancelled else { return }
-            await restartStreamsForFilter()
+        UserDefaults.standard.set(filterUsesRegex, forKey: Self.filterRegexKey)
+        appliedLogcatExpression = expression
+        filterGeneration += 1
+        for serial in Set(lines.keys).union(devices.map(\.serial)) {
+            lines[serial] = []
+        }
+        for device in devices where device.isOnline && !paused.contains(device.serial) {
+            streams[device.serial]?.discardPending()
+            stopStream(serial: device.serial, intentional: true)
+            await startStream(for: device, fromNow: false, force: true)
         }
     }
 
@@ -333,29 +348,6 @@ final class DeviceStore {
         streamWarnings[serial]
     }
 
-    private func restartStreamsForFilter() async {
-        let expression = LogcatFilter.expression(for: filter)
-        guard expression != appliedLogcatExpression else { return }
-        appliedLogcatExpression = expression
-        filterGeneration += 1
-        for device in devices {
-            let serial = device.serial
-            if device.isOnline && !paused.contains(serial) {
-                streams[serial]?.discardPending()
-                stopStream(serial: serial, intentional: true)
-                lines[serial] = []
-                await startStream(for: device, fromNow: false, force: true)
-            } else {
-                refilter(serial)
-            }
-        }
-    }
-
-    private func refilter(_ serial: String) {
-        let matched = (lines[serial] ?? []).filter { Self.matches($0, filter: filter) }
-        lines[serial] = Array(matched.suffix(Self.shownLimit))
-    }
-
     private func startRecording(serial: String) async {
         guard let device = devices.first(where: { $0.serial == serial }), device.isOnline else { return }
         paused.remove(serial)
@@ -371,7 +363,7 @@ final class DeviceStore {
 
     private func append(serial: String, newLines: [String]) {
         guard !paused.contains(serial) else { return }
-        let accepted = newLines.filter { Self.matches($0, filter: filter) }
+        let accepted = newLines.filter { matches($0) }
         guard !accepted.isEmpty else { return }
         var shown = lines[serial] ?? []
         shown.append(contentsOf: accepted)
@@ -405,7 +397,7 @@ final class DeviceStore {
         guard streams[serial] == nil else { return }
 
         streamWarnings[serial] = nil
-        let pattern = LogcatFilter.expression(for: filter)
+        let pattern = LogcatFilter.expression(for: filter, usesRegex: filterUsesRegex)
         let stream = LogStream(
             onLines: { [weak self] lines in
                 Task { @MainActor in
@@ -446,9 +438,14 @@ final class DeviceStore {
         streamWarnings[serial] = "日志连接已断开，请点刷新设备"
     }
 
-    private static func matches(_ line: String, filter: String) -> Bool {
+    private func matches(_ line: String) -> Bool {
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if needle.isEmpty { return true }
+        if filterUsesRegex {
+            guard let regex = try? NSRegularExpression(pattern: needle) else { return false }
+            let range = NSRange(line.startIndex..., in: line)
+            return regex.firstMatch(in: line, range: range) != nil
+        }
         return line.localizedCaseInsensitiveContains(needle)
     }
 }

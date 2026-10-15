@@ -9,10 +9,11 @@ struct ContentView: View {
     @Environment(DeviceStore.self) private var store
     @State private var selection: SidebarItem? = .all
     @State private var exportPickerPresented = false
+    @State private var filterInput = ""
+    @State private var filterInputUsesRegex = false
+    @State private var didLoadFilterDraft = false
 
     var body: some View {
-        @Bindable var store = store
-
         VStack(spacing: 0) {
             controlBar(store: store)
             Divider()
@@ -26,10 +27,12 @@ struct ContentView: View {
         }
         .frame(minWidth: 960, minHeight: 560)
         .task {
+            if !didLoadFilterDraft {
+                filterInput = store.filter
+                filterInputUsesRegex = store.filterUsesRegex
+                didLoadFilterDraft = true
+            }
             await store.start()
-        }
-        .onChange(of: store.filter) { _, _ in
-            store.filterDidChange()
         }
         .onChange(of: store.devices) { _, _ in
             guard case .device(let serial) = selection else { return }
@@ -43,18 +46,41 @@ struct ContentView: View {
     }
 
     private func controlBar(store: DeviceStore) -> some View {
-        @Bindable var store = store
-        return HStack(spacing: 10) {
-            Text("过滤")
-            TextField("例如 KeyboardHeight", text: $store.filter)
+        HStack(spacing: 10) {
+            TextField("输入过滤条件", text: $filterInput)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 220, maxWidth: 360)
-                .help("不区分大小写，按日志内容过滤后再抓取。留空则显示全部。下次打开会记住。")
-            if !store.filter.isEmpty {
-                Button("清除") {
-                    store.filter = ""
+                .help(filterFieldHelp)
+                .onSubmit { Task { await applyFilterDraft() } }
+            Button {
+                filterInputUsesRegex.toggle()
+            } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(filterInputUsesRegex ? Color.accentColor : Color.secondary)
+            .help(filterInputUsesRegex ? "正则模式已开启，点应用后生效" : "文本模式。点此改用正则，点应用后生效")
+            .accessibilityLabel("正则")
+            if showsClearFilter {
+                Button {
+                    clearFilter()
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
                 }
-                .controlSize(.small)
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .help("取消过滤并清空所有日志")
+                .accessibilityLabel("取消过滤")
+            }
+            Button("应用") {
+                Task { await applyFilterDraft() }
+            }
+            .disabled(filterDraftMatchesApplied || filterRegexIsInvalid)
+            .help(filterRegexIsInvalid ? "正则表达式不合法" : "按输入框的条件重新抓取，并清空已有日志")
+            if filterRegexIsInvalid {
+                Text("正则不合法")
+                    .font(.caption)
+                    .foregroundStyle(.red)
             }
             Spacer(minLength: 12)
             Toggle("实时", isOn: allLiveBinding)
@@ -94,6 +120,42 @@ struct ContentView: View {
     private var toolbarDivider: some View {
         Divider()
             .frame(height: 16)
+    }
+
+    private var trimmedFilterInput: String {
+        filterInput.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var filterRegexIsInvalid: Bool {
+        !LogcatFilter.isValid(trimmedFilterInput, usesRegex: filterInputUsesRegex)
+    }
+
+    private var filterDraftMatchesApplied: Bool {
+        let applied = store.filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedFilterInput.isEmpty && applied.isEmpty { return true }
+        return trimmedFilterInput == applied && filterInputUsesRegex == store.filterUsesRegex
+    }
+
+    private var showsClearFilter: Bool {
+        !trimmedFilterInput.isEmpty || !store.filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var filterFieldHelp: String {
+        if filterRegexIsInvalid { return "正则表达式不合法" }
+        if filterInputUsesRegex { return "正则模式，区分大小写。点应用后生效。留空则显示全部。" }
+        return "文本模式，不区分大小写。点应用后生效。留空则显示全部。"
+    }
+
+    private func clearFilter() {
+        filterInput = ""
+        guard !store.filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task { await store.applyFilter("", usesRegex: store.filterUsesRegex) }
+    }
+
+    private func applyFilterDraft() async {
+        guard !filterDraftMatchesApplied, !filterRegexIsInvalid else { return }
+        await store.applyFilter(trimmedFilterInput, usesRegex: filterInputUsesRegex)
+        filterInput = store.filter
     }
 
     private var showingSingleDevice: Bool {
