@@ -2,7 +2,7 @@
 
 macOS 上的 Android 和 iOS 日志查看工具。可以发现已连接的模拟器和真机，实时显示日志，并支持按文本或正则过滤、暂停、清空和导出。
 
-Android 通过 adb 读取 logcat。iOS 通过 Xcode 读取日志：模拟器使用 `simctl` 的 `log stream`，真机使用系统控制台同一套实时流。iOS 必须先选择一个或多个应用，日志才会开始进来。
+Android 通过 adb 读取 logcat。iOS 通过 Xcode 读取日志：模拟器使用 `simctl` 的 `log stream`，真机使用系统控制台同一套实时流。两边都按关键字过滤，不按应用过滤。有关键字时，过滤在设备上完成，只有匹配的日志会传过来。
 
 需要 macOS 14 及以上和 Swift 6。Android 需要本机可用的 adb（Android SDK platform-tools）。iOS 需要 Xcode，并且 `xcode-select` 指向它。真机需要用数据线连接，并在设备上信任这台 Mac。
 

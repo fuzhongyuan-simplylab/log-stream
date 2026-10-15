@@ -2,11 +2,40 @@ import Darwin
 import Foundation
 import os
 
-struct InstalledApp: Identifiable, Hashable, Sendable {
-    var id: String { bundleIdentifier }
-    var bundleIdentifier: String
-    var name: String
-    var processName: String
+enum IOSLogFilter {
+    private static let fields = ["eventMessage", "process", "subsystem", "category"]
+
+    /// Predicate text evaluated on the device, the same role as `logcat -e`.
+    static func format(matching filter: String, usesRegex: Bool) -> String? {
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        let expression: String
+        let op: String
+        if usesRegex {
+            let pattern = ".*(?:\(needle)).*"
+            guard (try? NSRegularExpression(pattern: pattern)) != nil else { return nil }
+            expression = escape(pattern)
+            op = "MATCHES"
+        } else {
+            expression = escape(needle)
+            op = "CONTAINS[c]"
+        }
+        return fields.map { "\($0) \(op) \"\(expression)\"" }.joined(separator: " OR ")
+    }
+
+    private static func escape(_ value: String) -> String {
+        var result = ""
+        for character in value {
+            switch character {
+            case "\\", "\"":
+                result.append("\\")
+                result.append(character)
+            default:
+                result.append(character)
+            }
+        }
+        return result
+    }
 }
 
 enum IOSClient {
@@ -24,38 +53,18 @@ enum IOSClient {
         return parseDevices(Data(result.stdout.utf8))
     }
 
-    static func listApps(udid: String) async throws -> [InstalledApp] {
-        let result = try await run(
-            ["devicectl", "device", "info", "apps", "--device", udid, "--json-output", "-", "--timeout", "30", "--quiet"],
-            timeout: 35
-        )
-        guard result.status == 0 else {
-            throw IOSClientError.commandFailed(failureMessage(result, fallback: "无法读取应用列表"))
-        }
-        return parseApps(Data(result.stdout.utf8))
-    }
-
-    static func simulatorArguments(udid: String, processNames: [String], includeDebug: Bool) -> [String] {
-        [
+    static func simulatorArguments(udid: String, predicate: String?, includeDebug: Bool) -> [String] {
+        var arguments = [
             "simctl", "spawn", udid,
             "log", "stream",
             "--style", "syslog",
             "--color", "none",
             "--level", includeDebug ? "debug" : "info",
-            "--predicate", processPredicate(processNames)
         ]
-    }
-
-    static func processPredicate(_ names: [String]) -> String {
-        names.map { name in
-            "process == \"\(escapePredicate(name))\""
-        }.joined(separator: " OR ")
-    }
-
-    private static func escapePredicate(_ value: String) -> String {
-        value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        if let predicate {
+            arguments.append(contentsOf: ["--predicate", predicate])
+        }
+        return arguments
     }
 
     private static func run(_ arguments: [String], timeout: TimeInterval) async throws -> ShellOutput {
@@ -171,41 +180,6 @@ enum IOSClient {
             isEmulator: isSimulator,
             productType: product
         )
-    }
-
-    private static func parseApps(_ data: Data) -> [InstalledApp] {
-        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let result = root["result"] as? [String: Any],
-              let apps = result["apps"] as? [[String: Any]] else {
-            return []
-        }
-        var seen: Set<String> = []
-        var parsed: [InstalledApp] = []
-        for app in apps {
-            let bundleID = string(app["bundleIdentifier"])
-            guard !bundleID.isEmpty, seen.insert(bundleID).inserted else { continue }
-            let name = string(app["name"])
-            let process = processName(url: string(app["url"]), fallback: name.isEmpty ? bundleID : name)
-            parsed.append(InstalledApp(
-                bundleIdentifier: bundleID,
-                name: name.isEmpty ? process : name,
-                processName: process
-            ))
-        }
-        return parsed.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    private static func processName(url: String, fallback: String) -> String {
-        var path = url
-        if path.hasSuffix("/") {
-            path.removeLast()
-        }
-        let last = (path as NSString).lastPathComponent
-        if last.hasSuffix(".app") {
-            let name = String(last.dropLast(4))
-            if !name.isEmpty { return name }
-        }
-        return fallback
     }
 
     private static func dictionary(_ value: Any?) -> [String: Any]? {

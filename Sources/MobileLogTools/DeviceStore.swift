@@ -37,8 +37,6 @@ final class DeviceStore {
     private(set) var isRefreshing = false
     private(set) var adbMissing = false
     private(set) var xcrunMissing = false
-    private(set) var installedApps: [String: [InstalledApp]] = [:]
-    private(set) var loadingApps: Set<String> = []
     private(set) var errorMessage: String?
     private(set) var exportNotice: String?
     private(set) var adbPath = ""
@@ -47,9 +45,8 @@ final class DeviceStore {
     private var streamWarnings: [String: String] = [:]
     private var streams: [String: LogStream] = [:]
     private var iosStreams: [String: IOSDeviceLogStream] = [:]
-    private var streamProcesses: [String: [String]] = [:]
+    private var streamPredicates: [String: String] = [:]
     private var streamDebug: [String: Bool] = [:]
-    private var selectedBundleIDs: [String: Set<String>] = [:]
     private var includeDebug: [String: Bool] = [:]
     private var intentionalStop: Set<String> = []
     private var paused: Set<String> = []
@@ -75,7 +72,6 @@ final class DeviceStore {
     private static let iosPhysicalSortFieldKey = "iosPhysicalSortField"
     private static let iosPhysicalSortAscendingKey = "iosPhysicalSortAscending"
     private static let platformKey = "logPlatform"
-    private static let selectedAppsKey = "iosSelectedApps"
     private static let includeDebugKey = "iosIncludeDebug"
     private static let shownLimit = 10_000
     private static let shownSlack = 100
@@ -93,9 +89,6 @@ final class DeviceStore {
         iosPhysicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.iosPhysicalSortFieldKey) ?? "") ?? .name
         iosPhysicalSortAscending = defaults.object(forKey: Self.iosPhysicalSortAscendingKey) as? Bool ?? true
         platform = DevicePlatform(rawValue: defaults.string(forKey: Self.platformKey) ?? "") ?? .android
-        if let stored = defaults.dictionary(forKey: Self.selectedAppsKey) as? [String: [String]] {
-            selectedBundleIDs = stored.mapValues(Set.init)
-        }
         if let stored = defaults.dictionary(forKey: Self.includeDebugKey) as? [String: Bool] {
             includeDebug = stored
         }
@@ -124,12 +117,12 @@ final class DeviceStore {
 
     var canStartAll: Bool {
         visibleDevices.contains { device in
-            device.isOnline && paused.contains(device.serial) && canRecord(device)
+            device.isOnline && paused.contains(device.serial)
         }
     }
 
     var canPauseAll: Bool {
-        visibleDevices.contains { $0.isOnline && !paused.contains($0.serial) && canRecord($0) }
+        visibleDevices.contains { $0.isOnline && !paused.contains($0.serial) }
     }
 
     func isPaused(_ serial: String) -> Bool {
@@ -233,19 +226,17 @@ final class DeviceStore {
         for serial in Array(lines.keys) where !foundIDs.contains(serial) {
             lines[serial] = nil
             streamWarnings[serial] = nil
-            installedApps[serial] = nil
         }
         startedSerials = startedSerials.intersection(foundIDs)
         liveDisabled = liveDisabled.intersection(foundIDs)
         devices = found
-        await loadApps(for: found.filter { $0.platform == .ios && $0.isOnline })
         stopStreams(on: platform == .android ? .ios : .android)
         for device in found where device.platform == platform {
-            if device.isOnline && !paused.contains(device.serial) && canRecord(device) {
+            if device.isOnline && !paused.contains(device.serial) {
                 let fromNow = startedSerials.contains(device.serial)
                 startedSerials.insert(device.serial)
                 await startStream(for: device, fromNow: fromNow)
-            } else if !canRecord(device) || !device.isOnline {
+            } else if !device.isOnline {
                 stopStream(serial: device.serial, intentional: true)
             }
         }
@@ -267,7 +258,7 @@ final class DeviceStore {
         for device in visibleDevices {
             lines[device.serial] = []
         }
-        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) && canRecord(device) {
+        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) {
             streams[device.serial]?.discardPending()
             iosStreams[device.serial]?.discardPending()
             stopStream(serial: device.serial, intentional: true)
@@ -365,52 +356,8 @@ final class DeviceStore {
         }
     }
 
-    func apps(for serial: String) -> [InstalledApp] {
-        installedApps[serial] ?? []
-    }
-
-    func isLoadingApps(_ serial: String) -> Bool {
-        loadingApps.contains(serial)
-    }
-
-    func selectedBundleIDs(for serial: String) -> Set<String> {
-        selectedBundleIDs[serial] ?? []
-    }
-
     func includesDebug(_ serial: String) -> Bool {
         includeDebug[serial] ?? false
-    }
-
-    func selectedAppNames(for serial: String) -> [String] {
-        let ids = selectedBundleIDs[serial] ?? []
-        return (installedApps[serial] ?? [])
-            .filter { ids.contains($0.bundleIdentifier) }
-            .map(\.name)
-            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
-    }
-
-    func setAppSelected(serial: String, bundleID: String, selected: Bool) async {
-        var ids = selectedBundleIDs[serial] ?? []
-        if selected {
-            ids.insert(bundleID)
-        } else {
-            ids.remove(bundleID)
-        }
-        selectedBundleIDs[serial] = ids
-        saveSelectedApps()
-        lines[serial] = []
-        streamWarnings[serial] = nil
-        guard let device = devices.first(where: { $0.serial == serial }),
-              device.platform == platform,
-              !paused.contains(serial) else {
-            if ids.isEmpty { stopStream(serial: serial, intentional: true) }
-            return
-        }
-        guard !ids.isEmpty else {
-            stopStream(serial: serial, intentional: true)
-            return
-        }
-        scheduleIOSRestart(for: device)
     }
 
     func setIncludesDebug(serial: String, enabled: Bool) async {
@@ -420,8 +367,7 @@ final class DeviceStore {
         guard let device = devices.first(where: { $0.serial == serial }),
               device.platform == platform,
               device.isOnline,
-              !paused.contains(serial),
-              canRecord(device) else {
+              !paused.contains(serial) else {
             return
         }
         scheduleIOSRestart(for: device)
@@ -469,15 +415,11 @@ final class DeviceStore {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
         let body = exportedLines.isEmpty ? "（暂无日志）" : exportedLines.joined(separator: "\n")
-        let apps = selectedAppNames(for: device.serial)
-        let appLine = device.platform == .ios
-            ? "\n应用: \(apps.isEmpty ? "（未选择）" : apps.joined(separator: "、"))"
-            : ""
         return """
         设备: \(device.name)
         类型: \(device.kindLabel)
         序列号: \(device.serial)
-        系统: \(device.versionLabel)\(appLine)
+        系统: \(device.versionLabel)
         状态: \(status)
         过滤: \(needle.isEmpty ? "（无）" : needle)
         导出时间: \(formatter.string(from: Date()))
@@ -504,10 +446,6 @@ final class DeviceStore {
 
     private func startRecording(serial: String) async {
         guard let device = devices.first(where: { $0.serial == serial }), device.isOnline else { return }
-        guard canRecord(device) else {
-            streamWarnings[serial] = "请先选择应用"
-            return
-        }
         paused.remove(serial)
         streamWarnings[serial] = nil
         startedSerials.insert(serial)
@@ -584,14 +522,11 @@ final class DeviceStore {
         guard device.isOnline else { return }
         let serial = device.serial
         guard !paused.contains(serial) else { return }
-        let names = selectedProcessNames(serial)
-        guard !names.isEmpty else {
-            stopStream(serial: serial, intentional: true)
-            return
-        }
+        let predicate = IOSLogFilter.format(matching: filter, usesRegex: filterUsesRegex)
+        let predicateKey = predicate ?? ""
         let debug = includeDebug[serial] ?? false
         let running = streams[serial] != nil || iosStreams[serial] != nil
-        if !force, running, streamProcesses[serial] == names, streamDebug[serial] == debug, !starting.contains(serial) {
+        if !force, running, streamPredicates[serial] == predicateKey, streamDebug[serial] == debug, !starting.contains(serial) {
             return
         }
         let token = filterGeneration
@@ -608,14 +543,14 @@ final class DeviceStore {
             do {
                 try stream.start(
                     executable: IOSClient.xcrunPath,
-                    arguments: IOSClient.simulatorArguments(udid: serial, processNames: names, includeDebug: debug)
+                    arguments: IOSClient.simulatorArguments(udid: serial, predicate: predicate, includeDebug: debug)
                 )
                 guard token == filterGeneration, !paused.contains(serial) else {
                     stream.stop()
                     return
                 }
                 streams[serial] = stream
-                streamProcesses[serial] = names
+                streamPredicates[serial] = predicateKey
                 streamDebug[serial] = debug
             } catch {
                 streamWarnings[serial] = "无法读取 \(device.name) 的日志：\(error.localizedDescription)"
@@ -649,7 +584,7 @@ final class DeviceStore {
                 }
                 guard proceed else { return }
                 do {
-                    try stream.start(udid: serial, processNames: names, includeDebug: debug, cutoff: cutoff)
+                    try stream.start(udid: serial, predicate: predicate, includeDebug: debug, cutoff: cutoff)
                 } catch {
                     await MainActor.run {
                         guard self.iosGeneration[serial] == generation else { return }
@@ -664,7 +599,7 @@ final class DeviceStore {
                         return false
                     }
                     self.iosStreams[serial] = stream
-                    self.streamProcesses[serial] = names
+                    self.streamPredicates[serial] = predicateKey
                     self.streamDebug[serial] = debug
                     self.streamWarnings[serial] = nil
                     return true
@@ -711,7 +646,7 @@ final class DeviceStore {
         streams[serial]?.stop()
         streams[serial] = nil
         let physical = iosStreams.removeValue(forKey: serial)
-        streamProcesses[serial] = nil
+        streamPredicates[serial] = nil
         streamDebug[serial] = nil
         guard let physical else { return }
         Task { @MainActor in
@@ -727,7 +662,7 @@ final class DeviceStore {
         }
         streams[serial] = nil
         iosStreams[serial] = nil
-        streamProcesses[serial] = nil
+        streamPredicates[serial] = nil
         streamDebug[serial] = nil
         streamWarnings[serial] = "日志连接已断开，请点刷新设备"
     }
@@ -750,35 +685,8 @@ final class DeviceStore {
         }
     }
 
-    private func loadApps(for targets: [Device]) async {
-        let serials = Set(targets.map(\.serial))
-        loadingApps.formUnion(serials)
-        defer { loadingApps.subtract(serials) }
-        await withTaskGroup(of: (String, [InstalledApp]?).self) { group in
-            for device in targets {
-                group.addTask {
-                    if device.isEmulator {
-                        return (device.serial, try? await IOSClient.listApps(udid: device.serial))
-                    }
-                    return (device.serial, IOSDeviceLogStream.userApps(udid: device.serial))
-                }
-            }
-            for await (serial, apps) in group {
-                guard let apps else { continue }
-                installedApps[serial] = apps
-                let valid = Set(apps.map(\.bundleIdentifier))
-                let selected = selectedBundleIDs[serial] ?? []
-                let pruned = selected.intersection(valid)
-                if pruned != selected {
-                    selectedBundleIDs[serial] = pruned
-                    saveSelectedApps()
-                }
-            }
-        }
-    }
-
     private func resumeVisibleStreams(fromNow: Bool) async {
-        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) && canRecord(device) {
+        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) {
             startedSerials.insert(device.serial)
             await startStream(for: device, fromNow: fromNow)
         }
@@ -788,24 +696,6 @@ final class DeviceStore {
         for device in devices where device.platform == platform {
             stopStream(serial: device.serial, intentional: true)
         }
-    }
-
-    private func canRecord(_ device: Device) -> Bool {
-        if device.platform == .android { return true }
-        return !selectedProcessNames(device.serial).isEmpty
-    }
-
-    private func selectedProcessNames(_ serial: String) -> [String] {
-        let ids = selectedBundleIDs[serial] ?? []
-        return (installedApps[serial] ?? [])
-            .filter { ids.contains($0.bundleIdentifier) }
-            .map(\.processName)
-            .sorted()
-    }
-
-    private func saveSelectedApps() {
-        let raw = selectedBundleIDs.mapValues { Array($0).sorted() }
-        UserDefaults.standard.set(raw, forKey: Self.selectedAppsKey)
     }
 
     private func matches(_ line: String) -> Bool {

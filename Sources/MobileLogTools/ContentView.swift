@@ -576,7 +576,7 @@ private struct DevicePane: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 if device.platform == .ios {
-                    appFilter
+                    debugLevelToggle
                 }
                 if let warning = store.warning(for: device.serial) {
                     Text(warning)
@@ -809,54 +809,16 @@ private struct DevicePane: View {
         searchScrollToken += 1
     }
 
-    private var appFilter: some View {
-        HStack(spacing: 8) {
-            Menu {
-                let apps = store.apps(for: device.serial)
-                if apps.isEmpty {
-                    Text(store.isLoadingApps(device.serial) ? "正在读取应用…" : "没有已安装的应用")
-                } else {
-                    ForEach(apps) { app in
-                        Toggle(app.name, isOn: appSelection(app.bundleIdentifier))
-                    }
-                }
-            } label: {
-                Text(appSelectionLabel)
-                    .lineLimit(1)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+    private var debugLevelToggle: some View {
+        Toggle("调试", isOn: debugBinding)
+            .toggleStyle(.checkbox)
+            .controlSize(.small)
             .disabled(!device.isOnline)
-            .help("选择后开始接收这些应用的日志，可多选")
-            Toggle("调试", isOn: debugBinding)
-                .toggleStyle(.checkbox)
-                .controlSize(.small)
-                .disabled(!device.isOnline || store.selectedBundleIDs(for: device.serial).isEmpty)
-                .help("显示 Debug 级别。默认只显示 Default、Info、Error 和 Fault")
-        }
-    }
-
-    private var appSelectionLabel: String {
-        let names = store.selectedAppNames(for: device.serial)
-        if names.isEmpty { return "选择应用" }
-        if names.count == 1 { return names[0] }
-        return "已选 \(names.count) 个应用"
+            .help("显示 Debug 级别。默认只显示 Default、Info、Error 和 Fault")
     }
 
     private var recordingLabel: String {
-        if device.platform == .ios && store.selectedBundleIDs(for: device.serial).isEmpty {
-            return "未选择应用"
-        }
-        return store.isPaused(device.serial) ? "已暂停" : "记录中"
-    }
-
-    private func appSelection(_ bundleID: String) -> Binding<Bool> {
-        Binding(
-            get: { store.selectedBundleIDs(for: device.serial).contains(bundleID) },
-            set: { selected in
-                Task { await store.setAppSelected(serial: device.serial, bundleID: bundleID, selected: selected) }
-            }
-        )
+        store.isPaused(device.serial) ? "已暂停" : "记录中"
     }
 
     private var debugBinding: Binding<Bool> {
@@ -878,11 +840,6 @@ private struct DevicePane: View {
     private var emptyMessage: String {
         if !device.isOnline {
             return "设备\(device.stateLabel)，无法读取日志"
-        }
-        if device.platform == .ios && store.selectedBundleIDs(for: device.serial).isEmpty {
-            if store.isLoadingApps(device.serial) { return "正在读取应用…" }
-            if store.apps(for: device.serial).isEmpty { return "没有已安装的应用" }
-            return "选择应用后开始记录"
         }
         let needle = store.filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if !needle.isEmpty {

@@ -41,23 +41,21 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         self.onEnd = onEnd
     }
 
-    func start(udid: String, processNames: [String], includeDebug: Bool, cutoff: Date) throws {
+    func start(udid: String, predicate: String?, includeDebug: Bool, cutoff: Date) throws {
         self.cutoff = cutoff.addingTimeInterval(-1)
-        guard !processNames.isEmpty else { throw IOSLogError.streamFailed }
         guard let mobile = Self.openMobileDevice(udid: udid) else {
             throw IOSLogError.deviceUnavailable
         }
         do {
             guard let messaging = Self.messaging() else { throw IOSLogError.streamFailed }
-            let names = Set(processNames)
             let delegate = StreamDelegate { [weak self] events in
-                self?.consume(events, allowed: names, includeDebug: includeDebug)
+                self?.consume(events, includeDebug: includeDebug)
             }
             let logDevice = try Self.makeLogDevice(mobile: mobile.object, udid: udid, messaging: messaging)
             let stream = try Self.makeStream(
                 logDevice: logDevice,
                 delegate: delegate,
-                processNames: processNames,
+                predicate: predicate,
                 includeDebug: includeDebug,
                 messaging: messaging
             )
@@ -101,14 +99,14 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         lock.unlock()
     }
 
-    private func consume(_ events: [NSObject], allowed: Set<String>, includeDebug: Bool) {
+    private func consume(_ events: [NSObject], includeDebug: Bool) {
         var lines: [String] = []
         lines.reserveCapacity(events.count)
         lock.lock()
         let stopped = stopped
         if !stopped {
             for event in events {
-                guard let line = format(event, allowed: allowed, includeDebug: includeDebug) else { continue }
+                guard let line = format(event, includeDebug: includeDebug) else { continue }
                 lines.append(line)
             }
         }
@@ -117,12 +115,11 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         enqueue(lines)
     }
 
-    private func format(_ event: NSObject, allowed: Set<String>, includeDebug: Bool) -> String? {
+    private func format(_ event: NSObject, includeDebug: Bool) -> String? {
         if let date = field(event, "timestamp") as? Date, date < cutoff {
             return nil
         }
         let process = field(event, "process") as? String ?? ""
-        guard allowed.contains(process) else { return nil }
         if !includeDebug, (field(event, "messageType") as? NSNumber)?.intValue == 2 {
             return nil
         }
@@ -190,43 +187,6 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         if !lines.isEmpty {
             onLines(lines)
         }
-    }
-
-    static func userApps(udid: String) -> [InstalledApp]? {
-        guard let mobile = openMobileDevice(udid: udid) else { return nil }
-        defer { closeMobileDevice(mobile.object) }
-        guard let handle = dlopen("/System/Library/PrivateFrameworks/MobileDevice.framework/MobileDevice", RTLD_NOW),
-              let lookupSymbol = dlsym(handle, "AMDeviceLookupApplications") else {
-            return nil
-        }
-        typealias LookupFn = @convention(c) (UnsafeMutableRawPointer, CFDictionary?, UnsafeMutablePointer<Unmanaged<CFDictionary>?>) -> Int32
-        var result: Unmanaged<CFDictionary>?
-        let options = ["ApplicationType": "User"] as CFDictionary
-        let status = unsafeBitCast(lookupSymbol, to: LookupFn.self)(mobile.pointer, options, &result)
-        guard status == 0, let dictionary = result?.takeRetainedValue() as NSDictionary? else { return nil }
-        var apps: [InstalledApp] = []
-        for (key, value) in dictionary {
-            guard let bundleID = key as? String, !bundleID.isEmpty,
-                  let info = value as? NSDictionary else { continue }
-            let display = trimmed(info["CFBundleDisplayName"])
-            let bundleName = trimmed(info["CFBundleName"])
-            let executable = trimmed(info["CFBundleExecutable"])
-            let path = info["Path"] as? String ?? ""
-            let process = executable.isEmpty ? processName(path: path, fallback: bundleName.isEmpty ? bundleID : bundleName) : executable
-            let name = display.isEmpty ? (bundleName.isEmpty ? process : bundleName) : display
-            apps.append(InstalledApp(bundleIdentifier: bundleID, name: name, processName: process))
-        }
-        return apps.sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-    }
-
-    private static func trimmed(_ value: Any?) -> String {
-        ((value as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func processName(path: String, fallback: String) -> String {
-        let file = (path as NSString).lastPathComponent
-        guard file.hasSuffix(".app") else { return fallback }
-        return String(file.dropLast(4))
     }
 
     private static func messaging() -> UnsafeMutableRawPointer? {
@@ -299,7 +259,7 @@ final class IOSDeviceLogStream: @unchecked Sendable {
     private static func makeStream(
         logDevice: AnyObject,
         delegate: StreamDelegate,
-        processNames: [String],
+        predicate: String?,
         includeDebug: Bool,
         messaging: UnsafeMutableRawPointer
     ) throws -> AnyObject {
@@ -321,9 +281,9 @@ final class IOSDeviceLogStream: @unchecked Sendable {
         setObject(created, sel_registerName("setDevice:"), logDevice)
         _ = unsafeBitCast(messaging, to: TrustFn.self)(created, sel_registerName("establishTrust:"), nil)
         setObject(created, sel_registerName("setDelegate:"), delegate)
-        let placeholders = Array(repeating: "process == %@", count: processNames.count).joined(separator: " OR ")
-        let predicate = NSPredicate(format: placeholders, argumentArray: processNames)
-        setObject(created, sel_registerName("setPredicate:"), predicate)
+        if let predicate {
+            setObject(created, sel_registerName("setPredicate:"), NSPredicate(format: predicate))
+        }
         var options: UInt64 = 4 | 8 | 256
         if includeDebug {
             options |= 512
