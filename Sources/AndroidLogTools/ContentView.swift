@@ -58,36 +58,43 @@ struct ContentView: View {
                 .controlSize(.small)
             }
             Spacer(minLength: 12)
-            Toggle("实时模式", isOn: allLiveBinding)
+            Toggle("实时", isOn: allLiveBinding)
                 .toggleStyle(.checkbox)
                 .disabled(store.devices.isEmpty)
                 .help("开启后所有设备都跟随最新日志。滚动某个日志区域会单独关闭该设备的实时模式。")
-            Button("全部开始") {
+            Button("开始") {
                 Task { await store.startAll() }
             }
             .disabled(!store.canStartAll)
             .help("开始所有已暂停的在线设备")
-            Button("全部暂停") {
+            Button("暂停") {
                 store.pauseAll()
             }
             .disabled(!store.canPauseAll)
             .help("暂停所有正在记录的在线设备。已有日志保留，暂停期间的日志不会补上")
+            Button("清空") {
+                Task { await store.clearAllLogs() }
+            }
+            .keyboardShortcut(.delete, modifiers: [.command, .shift])
+            .disabled(!store.hasOnlineDevice)
+            .help("清空所有在线设备的 logcat 缓冲")
+            toolbarDivider
             Button("刷新设备") {
                 Task { await store.refresh() }
             }
             .keyboardShortcut("r", modifiers: .command)
             .disabled(store.isRefreshing || store.adbMissing)
             .help("重新检测已连接的虚拟机和真机")
-            Button("清空全部日志") {
-                Task { await store.clearAllLogs() }
-            }
-            .keyboardShortcut(.delete, modifiers: [.command, .shift])
-            .disabled(!store.hasOnlineDevice)
-            .help("清空所有在线设备的 logcat 缓冲")
+            toolbarDivider
             exportToolbarButton
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var toolbarDivider: some View {
+        Divider()
+            .frame(height: 16)
     }
 
     private var allLiveBinding: Binding<Bool> {
@@ -358,27 +365,39 @@ private struct DevicePane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Label(device.kindLabel, systemImage: device.symbolName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Text(device.name)
-                        .font(.headline)
-                        .lineLimit(1)
+                HStack(alignment: .center, spacing: 8) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Label(device.kindLabel, systemImage: device.symbolName)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Text(device.name)
+                            .font(.headline)
+                            .lineLimit(1)
+                    }
                     Spacer(minLength: 8)
-                    SingleDeviceExportMenu(device: device, compact: true)
-                    Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
-                        Task { await store.toggleRecording(serial: device.serial) }
+                    HStack(alignment: .center, spacing: 8) {
+                        Toggle("实时", isOn: liveBinding)
+                            .toggleStyle(.checkbox)
+                            .controlSize(.small)
+                            .foregroundStyle(.primary)
+                            .help("开启后始终显示最新日志。滚动此区域会关闭实时模式。")
+                        Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
+                            Task { await store.toggleRecording(serial: device.serial) }
+                        }
+                        .controlSize(.small)
+                        .disabled(!device.isOnline)
+                        .help(store.isPaused(device.serial) ? "从现在开始记录，暂停期间的日志不会补上" : "停止追加新日志，已有内容保留")
+                        Button("清空日志") {
+                            Task { await store.clearLogs(serial: device.serial) }
+                        }
+                        .controlSize(.small)
+                        .disabled(!device.isOnline)
+                        .help("清空这台设备的 logcat 缓冲")
+                        Rectangle()
+                            .fill(.separator)
+                            .frame(width: 1, height: 16)
+                        SingleDeviceExportMenu(device: device, compact: true)
                     }
-                    .controlSize(.small)
-                    .disabled(!device.isOnline)
-                    .help(store.isPaused(device.serial) ? "从现在开始记录，暂停期间的日志不会补上" : "停止追加新日志，已有内容保留")
-                    Button("清空日志") {
-                        Task { await store.clearLogs(serial: device.serial) }
-                    }
-                    .controlSize(.small)
-                    .disabled(!device.isOnline)
-                    .help("清空这台设备的 logcat 缓冲")
                 }
                 HStack(spacing: 6) {
                     Text(device.serial)
@@ -392,11 +411,6 @@ private struct DevicePane: View {
                     if device.isOnline {
                         Text(store.isPaused(device.serial) ? "已暂停" : "记录中")
                     }
-                    Toggle("实时", isOn: liveBinding)
-                        .toggleStyle(.checkbox)
-                        .controlSize(.small)
-                        .foregroundStyle(.primary)
-                        .help("开启后始终显示最新日志。滚动此区域会关闭实时模式。")
                     Text("\(store.lineCount(for: device.serial)) 行")
                         .monospacedDigit()
                 }
