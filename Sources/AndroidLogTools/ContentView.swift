@@ -58,6 +58,10 @@ struct ContentView: View {
                 .controlSize(.small)
             }
             Spacer(minLength: 12)
+            Toggle("实时模式", isOn: allLiveBinding)
+                .toggleStyle(.checkbox)
+                .disabled(store.devices.isEmpty)
+                .help("开启后所有设备都跟随最新日志。滚动某个日志区域会单独关闭该设备的实时模式。")
             Button("全部开始") {
                 Task { await store.startAll() }
             }
@@ -84,6 +88,13 @@ struct ContentView: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    private var allLiveBinding: Binding<Bool> {
+        Binding(
+            get: { store.allDevicesLive },
+            set: { store.setAllLive($0) }
+        )
     }
 
     @ViewBuilder
@@ -381,6 +392,11 @@ private struct DevicePane: View {
                     if device.isOnline {
                         Text(store.isPaused(device.serial) ? "已暂停" : "记录中")
                     }
+                    Toggle("实时", isOn: liveBinding)
+                        .toggleStyle(.checkbox)
+                        .controlSize(.small)
+                        .foregroundStyle(.primary)
+                        .help("开启后始终显示最新日志。滚动此区域会关闭实时模式。")
                     Text("\(store.lineCount(for: device.serial)) 行")
                         .monospacedDigit()
                 }
@@ -402,7 +418,11 @@ private struct DevicePane: View {
             Divider()
 
             ZStack {
-                LogTextView(lines: store.logLines(for: device.serial))
+                LogTextView(
+                    lines: store.logLines(for: device.serial),
+                    isLive: store.isLive(device.serial),
+                    onLeaveLive: { store.setLive(device.serial, false) }
+                )
                 if store.logLines(for: device.serial).isEmpty {
                     Text(emptyMessage)
                         .font(.callout)
@@ -413,6 +433,13 @@ private struct DevicePane: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var liveBinding: Binding<Bool> {
+        Binding(
+            get: { store.isLive(device.serial) },
+            set: { store.setLive(device.serial, $0) }
+        )
     }
 
     private var emptyMessage: String {

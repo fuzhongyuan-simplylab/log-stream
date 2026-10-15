@@ -30,6 +30,7 @@ final class DeviceStore {
     private var streams: [String: LogStream] = [:]
     private var intentionalStop: Set<String> = []
     private var paused: Set<String> = []
+    private var liveDisabled: Set<String> = []
     private var startedSerials: Set<String> = []
     private var starting: Set<String> = []
     private var client: AdbClient?
@@ -76,6 +77,35 @@ final class DeviceStore {
 
     func isPaused(_ serial: String) -> Bool {
         paused.contains(serial)
+    }
+
+    func isLive(_ serial: String) -> Bool {
+        !liveDisabled.contains(serial)
+    }
+
+    var allDevicesLive: Bool {
+        devices.allSatisfy { isLive($0.serial) }
+    }
+
+    func setLive(_ serial: String, _ live: Bool) {
+        var next = liveDisabled
+        if live {
+            guard next.remove(serial) != nil else { return }
+        } else {
+            guard next.insert(serial).inserted else { return }
+        }
+        liveDisabled = next
+    }
+
+    func setAllLive(_ live: Bool) {
+        if live {
+            guard !liveDisabled.isEmpty else { return }
+            liveDisabled = []
+        } else {
+            let all = Set(devices.map(\.serial))
+            guard liveDisabled != all else { return }
+            liveDisabled = all
+        }
     }
 
     var summaryText: String {
@@ -129,6 +159,7 @@ final class DeviceStore {
                 streamWarnings[serial] = nil
             }
             startedSerials = startedSerials.intersection(foundIDs)
+            liveDisabled = liveDisabled.intersection(foundIDs)
             devices = found
             for device in found {
                 if device.isOnline && !paused.contains(device.serial) {
