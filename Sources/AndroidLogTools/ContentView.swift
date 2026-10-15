@@ -72,12 +72,13 @@ struct ContentView: View {
     }
 
     private var sidebar: some View {
-        List(selection: $selection) {
+        @Bindable var store = store
+        return List(selection: $selection) {
             Section {
                 Label("全部设备", systemImage: "rectangle.split.3x1")
                     .tag(SidebarItem.all)
             }
-            Section("虚拟机（\(store.emulators.count)）") {
+            Section {
                 if store.emulators.isEmpty {
                     Text("未连接")
                         .foregroundStyle(.secondary)
@@ -87,8 +88,16 @@ struct ContentView: View {
                             .tag(SidebarItem.device(device.serial))
                     }
                 }
+            } header: {
+                listHeader(
+                    title: "虚拟机",
+                    count: store.emulators.count,
+                    field: $store.emulatorSortField,
+                    ascending: $store.emulatorSortAscending,
+                    isEmulator: true
+                )
             }
-            Section("真机（\(store.physicalDevices.count)）") {
+            Section {
                 if store.physicalDevices.isEmpty {
                     Text("未连接")
                         .foregroundStyle(.secondary)
@@ -98,11 +107,33 @@ struct ContentView: View {
                             .tag(SidebarItem.device(device.serial))
                     }
                 }
+            } header: {
+                listHeader(
+                    title: "真机",
+                    count: store.physicalDevices.count,
+                    field: $store.physicalSortField,
+                    ascending: $store.physicalSortAscending,
+                    isEmulator: false
+                )
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 210, ideal: 250, max: 340)
+        .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
         .navigationTitle("Android 日志")
+    }
+
+    private func listHeader(
+        title: String,
+        count: Int,
+        field: Binding<DeviceSortField>,
+        ascending: Binding<Bool>,
+        isEmulator: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("\(title)（\(count)）")
+            sortControls(field: field, ascending: ascending, isEmulator: isEmulator)
+        }
+        .textCase(nil)
     }
 
     private func deviceRow(_ device: Device) -> some View {
@@ -156,29 +187,75 @@ struct ContentView: View {
         }
     }
 
-    @ViewBuilder
     private var allDevices: some View {
+        @Bindable var store = store
         let emulators = store.emulators
         let phones = store.physicalDevices
-        if !emulators.isEmpty && !phones.isEmpty {
-            VStack(spacing: 0) {
-                sectionTitle("虚拟机")
+        return VStack(spacing: 0) {
+            if !emulators.isEmpty {
+                sectionTitle(
+                    "虚拟机",
+                    field: $store.emulatorSortField,
+                    ascending: $store.emulatorSortAscending,
+                    isEmulator: true
+                )
                 deviceColumns(emulators)
+            }
+            if !emulators.isEmpty && !phones.isEmpty {
                 Divider()
-                sectionTitle("真机")
+            }
+            if !phones.isEmpty {
+                sectionTitle(
+                    "真机",
+                    field: $store.physicalSortField,
+                    ascending: $store.physicalSortAscending,
+                    isEmulator: false
+                )
                 deviceColumns(phones)
             }
-        } else {
-            deviceColumns(store.devices)
         }
     }
 
-    private func sectionTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.headline)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+    private func sectionTitle(
+        _ title: String,
+        field: Binding<DeviceSortField>,
+        ascending: Binding<Bool>,
+        isEmulator: Bool
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.headline)
+            sortControls(field: field, ascending: ascending, isEmulator: isEmulator)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
+    private func sortControls(
+        field: Binding<DeviceSortField>,
+        ascending: Binding<Bool>,
+        isEmulator: Bool
+    ) -> some View {
+        HStack(spacing: 2) {
+            Picker("排序", selection: field) {
+                ForEach(DeviceSortField.allCases) { item in
+                    Text(item.title(isEmulator: isEmulator)).tag(item)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .fixedSize()
+            .help("调整排列顺序。侧边栏和全部设备页面使用同一顺序。")
+            Button {
+                ascending.wrappedValue.toggle()
+            } label: {
+                Image(systemName: ascending.wrappedValue ? "arrow.up" : "arrow.down")
+            }
+            .buttonStyle(.borderless)
+            .help(ascending.wrappedValue ? "当前升序，点击改为降序" : "当前降序，点击改为升序")
+        }
+        .controlSize(.small)
     }
 
     private func deviceColumns(_ devices: [Device]) -> some View {

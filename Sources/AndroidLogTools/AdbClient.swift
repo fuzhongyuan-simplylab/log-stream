@@ -35,6 +35,116 @@ struct Device: Identifiable, Hashable, Sendable {
             return state
         }
     }
+
+    var emulatorPort: Int? {
+        guard serial.hasPrefix("emulator-"),
+              let value = serial.split(separator: "-").last,
+              let port = Int(value) else {
+            return nil
+        }
+        return port
+    }
+
+    static func sorted(_ devices: [Device], field: DeviceSortField, ascending: Bool) -> [Device] {
+        devices.sorted { lhs, rhs in
+            lhs.comesBefore(rhs, field: field, ascending: ascending)
+        }
+    }
+
+    fileprivate func comesBefore(_ other: Device, field: DeviceSortField, ascending: Bool) -> Bool {
+        let missingSelf = field.isMissing(self)
+        let missingOther = field.isMissing(other)
+        if missingSelf != missingOther {
+            return !missingSelf
+        }
+        let comparison = field.compare(self, other)
+        if comparison == .orderedSame {
+            return serial < other.serial
+        }
+        return ascending ? comparison == .orderedAscending : comparison == .orderedDescending
+    }
+}
+
+enum DeviceSortField: String, CaseIterable, Identifiable, Sendable {
+    case name
+    case api
+    case androidVersion
+    case connection
+
+    var id: String { rawValue }
+
+    func title(isEmulator: Bool) -> String {
+        switch self {
+        case .name:
+            return "名称"
+        case .api:
+            return "API"
+        case .androidVersion:
+            return "Android 版本"
+        case .connection:
+            return isEmulator ? "端口" : "序列号"
+        }
+    }
+
+    fileprivate func isMissing(_ device: Device) -> Bool {
+        switch self {
+        case .name:
+            return device.name.isEmpty
+        case .api:
+            return Int(device.apiLevel) == nil
+        case .androidVersion:
+            return Self.versionNumbers(device.androidVersion) == nil
+        case .connection:
+            return false
+        }
+    }
+
+    fileprivate func compare(_ lhs: Device, _ rhs: Device) -> ComparisonResult {
+        switch self {
+        case .name:
+            return lhs.name.localizedStandardCompare(rhs.name)
+        case .api:
+            let left = Int(lhs.apiLevel) ?? 0
+            let right = Int(rhs.apiLevel) ?? 0
+            if left < right { return .orderedAscending }
+            if left > right { return .orderedDescending }
+            return .orderedSame
+        case .androidVersion:
+            let left = Self.versionNumbers(lhs.androidVersion) ?? []
+            let right = Self.versionNumbers(rhs.androidVersion) ?? []
+            return Self.compareVersions(left, right)
+        case .connection:
+            if let left = lhs.emulatorPort, let right = rhs.emulatorPort {
+                if left < right { return .orderedAscending }
+                if left > right { return .orderedDescending }
+                return .orderedSame
+            }
+            return lhs.serial.localizedStandardCompare(rhs.serial)
+        }
+    }
+
+    private static func versionNumbers(_ version: String) -> [Int]? {
+        let trimmed = version.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty || trimmed == "未知" {
+            return nil
+        }
+        let parts = trimmed.split(separator: ".").map { Int($0) }
+        if parts.isEmpty || parts.contains(where: { $0 == nil }) {
+            return nil
+        }
+        return parts.compactMap { $0 }
+    }
+
+    private static func compareVersions(_ lhs: [Int], _ rhs: [Int]) -> ComparisonResult {
+        let count = max(lhs.count, rhs.count)
+        for index in 0..<count {
+            let left = index < lhs.count ? lhs[index] : 0
+            let right = index < rhs.count ? rhs[index] : 0
+            if left < right { return .orderedAscending }
+            if left > right { return .orderedDescending }
+        }
+        return .orderedSame
+    }
 }
 
 struct ShellOutput: Sendable {

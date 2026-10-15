@@ -6,6 +6,18 @@ import Observation
 final class DeviceStore {
     private(set) var devices: [Device] = []
     var filter: String
+    var emulatorSortField: DeviceSortField {
+        didSet { UserDefaults.standard.set(emulatorSortField.rawValue, forKey: Self.emulatorSortFieldKey) }
+    }
+    var emulatorSortAscending: Bool {
+        didSet { UserDefaults.standard.set(emulatorSortAscending, forKey: Self.emulatorSortAscendingKey) }
+    }
+    var physicalSortField: DeviceSortField {
+        didSet { UserDefaults.standard.set(physicalSortField.rawValue, forKey: Self.physicalSortFieldKey) }
+    }
+    var physicalSortAscending: Bool {
+        didSet { UserDefaults.standard.set(physicalSortAscending, forKey: Self.physicalSortAscendingKey) }
+    }
     private(set) var isRefreshing = false
     private(set) var adbMissing = false
     private(set) var errorMessage: String?
@@ -20,21 +32,30 @@ final class DeviceStore {
     private var didStart = false
 
     private static let filterKey = "logFilter"
+    private static let emulatorSortFieldKey = "emulatorSortField"
+    private static let emulatorSortAscendingKey = "emulatorSortAscending"
+    private static let physicalSortFieldKey = "physicalSortField"
+    private static let physicalSortAscendingKey = "physicalSortAscending"
     private static let rawLimit = 20_000
     private static let rawSlack = 2_000
     private static let shownLimit = 2_000
     private static let shownSlack = 400
 
     init() {
-        filter = UserDefaults.standard.string(forKey: Self.filterKey) ?? ""
+        let defaults = UserDefaults.standard
+        filter = defaults.string(forKey: Self.filterKey) ?? ""
+        emulatorSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.emulatorSortFieldKey) ?? "") ?? .connection
+        emulatorSortAscending = defaults.object(forKey: Self.emulatorSortAscendingKey) as? Bool ?? true
+        physicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.physicalSortFieldKey) ?? "") ?? .name
+        physicalSortAscending = defaults.object(forKey: Self.physicalSortAscendingKey) as? Bool ?? true
     }
 
     var emulators: [Device] {
-        devices.filter(\.isEmulator)
+        Device.sorted(devices.filter(\.isEmulator), field: emulatorSortField, ascending: emulatorSortAscending)
     }
 
     var physicalDevices: [Device] {
-        devices.filter { !$0.isEmulator }
+        Device.sorted(devices.filter { !$0.isEmulator }, field: physicalSortField, ascending: physicalSortAscending)
     }
 
     var hasOnlineDevice: Bool {
