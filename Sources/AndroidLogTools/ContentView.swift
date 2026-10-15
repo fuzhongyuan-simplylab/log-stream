@@ -61,7 +61,7 @@ struct ContentView: View {
             Toggle("实时", isOn: allLiveBinding)
                 .toggleStyle(.checkbox)
                 .disabled(store.devices.isEmpty)
-                .help("开启后所有设备都跟随最新日志。滚动某个日志区域会单独关闭该设备的实时模式。")
+                .help("开启后所有设备都跟随最新日志。某台设备滚离底部会单独关闭实时模式，滚回底部会重新开启。")
             Button("开始") {
                 Task { await store.startAll() }
             }
@@ -380,7 +380,7 @@ private struct DevicePane: View {
                             .toggleStyle(.checkbox)
                             .controlSize(.small)
                             .foregroundStyle(.primary)
-                            .help("开启后始终显示最新日志。滚动此区域会关闭实时模式。")
+                            .help("开启后始终显示最新日志。离开底部会关闭，滚回底部会重新开启。")
                         Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
                             Task { await store.toggleRecording(serial: device.serial) }
                         }
@@ -435,7 +435,7 @@ private struct DevicePane: View {
                 LogTextView(
                     lines: store.logLines(for: device.serial),
                     isLive: store.isLive(device.serial),
-                    onLeaveLive: { store.setLive(device.serial, false) }
+                    onLiveChange: { store.setLive(device.serial, $0) }
                 )
                 if store.logLines(for: device.serial).isEmpty {
                     Text(emptyMessage)

@@ -4,7 +4,7 @@ import SwiftUI
 struct LogTextView: NSViewRepresentable {
     var lines: [String]
     var isLive: Bool
-    var onLeaveLive: () -> Void
+    var onLiveChange: (Bool) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator()
@@ -53,14 +53,20 @@ struct LogTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let scrollView = scrollView as? LogScrollView,
               let textView = scrollView.documentView as? NSTextView else { return }
-        scrollView.onUserLeftBottom = { [onLeaveLive] in
-            onLeaveLive()
+        scrollView.isLive = isLive
+        scrollView.onLiveChange = { [onLiveChange] atBottom in
+            onLiveChange(atBottom)
         }
 
         let old = context.coordinator.lines
         let becameLive = isLive && !context.coordinator.wasLive
         context.coordinator.wasLive = isLive
-        guard old != lines || becameLive else { return }
+        guard old != lines || becameLive else {
+            if isLive {
+                scrollView.followLive()
+            }
+            return
+        }
 
         let savedOrigin = scrollView.contentView.bounds.origin
         if old != lines {
@@ -85,21 +91,11 @@ struct LogTextView: NSViewRepresentable {
         }
 
         if isLive {
-            scrollToEnd(textView, scrollView: scrollView)
+            scrollView.followLive()
         } else if old != lines, !lines.starts(with: old) {
             scrollView.programmaticScroll = true
             scrollView.contentView.scroll(to: savedOrigin)
-            scrollView.programmaticScroll = false
-        }
-    }
-
-    private func scrollToEnd(_ textView: NSTextView, scrollView: LogScrollView) {
-        guard let container = textView.textContainer else { return }
-        textView.layoutManager?.ensureLayout(for: container)
-        scrollView.programmaticScroll = true
-        let length = (textView.string as NSString).length
-        textView.scrollRangeToVisible(NSRange(location: length, length: 0))
-        DispatchQueue.main.async {
+            scrollView.reflectScrolledClipView(scrollView.contentView)
             scrollView.programmaticScroll = false
         }
     }
@@ -118,29 +114,90 @@ struct LogTextView: NSViewRepresentable {
 }
 
 final class LogScrollView: NSScrollView {
+    var isLive = false
     var programmaticScroll = false
-    var onUserLeftBottom: (() -> Void)?
+    var onLiveChange: ((Bool) -> Void)?
+    private var userScrolling = false
+    private var followedSize: NSSize = .zero
 
-    override func scrollWheel(with event: NSEvent) {
-        super.scrollWheel(with: event)
-        reportUserScroll()
-    }
-
-    override func reflectScrolledClipView(_ clipView: NSClipView) {
-        super.reflectScrolledClipView(clipView)
-        guard !programmaticScroll else { return }
-        guard let event = NSApp.currentEvent else { return }
-        switch event.type {
-        case .leftMouseDragged, .leftMouseDown, .scrollWheel:
-            reportUserScroll()
-        default:
-            break
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        followedSize = .zero
+        guard window != nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.followLive()
         }
     }
 
+    override func layout() {
+        super.layout()
+        let size = contentView.bounds.size
+        let changed = abs(size.width - followedSize.width) > 0.5 || abs(size.height - followedSize.height) > 0.5
+        guard changed else { return }
+        followedSize = size
+        followLive()
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        userScrolling = true
+        super.scrollWheel(with: event)
+        reportUserScroll()
+        userScrolling = false
+    }
+
+    override func reflectScrolledClipView(_ clipView: NSClipView) {
+        let userEvent = !programmaticScroll && isUserScrollEvent
+        if userEvent { userScrolling = true }
+        super.reflectScrolledClipView(clipView)
+        if userEvent {
+            reportUserScroll()
+            userScrolling = false
+        }
+    }
+
+    func followLive() {
+        guard isLive, !userScrolling, !programmaticScroll, !isNearBottom else { return }
+        pinToBottom()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isLive, !self.userScrolling, !self.programmaticScroll, !self.isNearBottom else { return }
+            self.pinToBottom()
+        }
+    }
+
+    private func pinToBottom() {
+        guard let textView = documentView as? NSTextView else { return }
+        programmaticScroll = true
+        if let container = textView.textContainer {
+            textView.layoutManager?.ensureLayout(for: container)
+        }
+        let length = (textView.string as NSString).length
+        textView.scrollRangeToVisible(NSRange(location: length, length: 0))
+        let contentHeight = textView.frame.height
+        let visibleHeight = contentView.bounds.height
+        if contentHeight > visibleHeight + 1 {
+            var origin = contentView.bounds.origin
+            origin.y = contentHeight - visibleHeight
+            contentView.scroll(to: origin)
+            reflectScrolledClipView(contentView)
+        }
+        programmaticScroll = false
+    }
+
     private func reportUserScroll() {
-        guard canScrollContent, !isNearBottom else { return }
-        onUserLeftBottom?()
+        guard canScrollContent else { return }
+        let atBottom = isNearBottom
+        isLive = atBottom
+        onLiveChange?(atBottom)
+    }
+
+    private var isUserScrollEvent: Bool {
+        guard let event = NSApp.currentEvent else { return false }
+        switch event.type {
+        case .leftMouseDragged, .leftMouseDown, .scrollWheel, .keyDown:
+            return true
+        default:
+            return false
+        }
     }
 
     private var canScrollContent: Bool {
