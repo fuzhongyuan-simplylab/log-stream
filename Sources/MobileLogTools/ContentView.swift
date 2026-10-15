@@ -375,29 +375,69 @@ struct ContentView: View {
         @Bindable var store = store
         let emulators = store.emulators
         let phones = store.physicalDevices
-        return VStack(spacing: 0) {
-            if !emulators.isEmpty {
-                sectionTitle(
-                    store.platform == .ios ? "模拟器" : "虚拟机",
-                    field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
-                    ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
-                    isEmulator: true
-                )
-                deviceColumns(emulators)
-            }
-            if !emulators.isEmpty && !phones.isEmpty {
-                Divider()
-            }
-            if !phones.isEmpty {
-                sectionTitle(
-                    "真机",
-                    field: store.platform == .ios ? $store.iosPhysicalSortField : $store.physicalSortField,
-                    ascending: store.platform == .ios ? $store.iosPhysicalSortAscending : $store.physicalSortAscending,
-                    isEmulator: false
-                )
-                deviceColumns(phones)
+        let devices = emulators + phones
+        return GeometryReader { geo in
+            let dividerWidth: CGFloat = 1
+            let headerHeight: CGFloat = 40
+            let gaps = dividerWidth * CGFloat(max(devices.count - 1, 0))
+            let count = CGFloat(max(devices.count, 1))
+            let columnWidth = max(Self.deviceColumnMinWidth, (geo.size.width - gaps) / count)
+            let contentWidth = columnWidth * CGFloat(devices.count) + gaps
+            let paneHeight = max(0, geo.size.height - headerHeight)
+            ScrollView(.horizontal) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) {
+                        if !emulators.isEmpty {
+                            sectionTitle(
+                                store.platform == .ios ? "模拟器" : "虚拟机",
+                                field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
+                                ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
+                                isEmulator: true
+                            )
+                            .frame(
+                                width: groupWidth(count: emulators.count, columnWidth: columnWidth, dividerWidth: dividerWidth),
+                                alignment: .leading
+                            )
+                        }
+                        if !emulators.isEmpty && !phones.isEmpty {
+                            Rectangle()
+                                .fill(.separator)
+                                .frame(width: dividerWidth, height: headerHeight)
+                        }
+                        if !phones.isEmpty {
+                            sectionTitle(
+                                "真机",
+                                field: store.platform == .ios ? $store.iosPhysicalSortField : $store.physicalSortField,
+                                ascending: store.platform == .ios ? $store.iosPhysicalSortAscending : $store.physicalSortAscending,
+                                isEmulator: false
+                            )
+                            .frame(
+                                width: groupWidth(count: phones.count, columnWidth: columnWidth, dividerWidth: dividerWidth),
+                                alignment: .leading
+                            )
+                        }
+                    }
+                    .frame(height: headerHeight, alignment: .leading)
+                    HStack(alignment: .top, spacing: 0) {
+                        ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
+                            if index > 0 {
+                                Rectangle()
+                                    .fill(.separator)
+                                    .frame(width: dividerWidth, height: paneHeight)
+                            }
+                            DevicePane(device: device)
+                                .frame(width: columnWidth, height: paneHeight, alignment: .top)
+                        }
+                    }
+                    .frame(height: paneHeight, alignment: .top)
+                }
+                .frame(width: max(contentWidth, geo.size.width), height: geo.size.height, alignment: .topLeading)
             }
         }
+    }
+
+    private func groupWidth(count: Int, columnWidth: CGFloat, dividerWidth: CGFloat) -> CGFloat {
+        columnWidth * CGFloat(count) + dividerWidth * CGFloat(max(count - 1, 0))
     }
 
     private func sectionTitle(
@@ -442,23 +482,7 @@ struct ContentView: View {
         .controlSize(.small)
     }
 
-    private func deviceColumns(_ devices: [Device]) -> some View {
-        GeometryReader { geo in
-            let dividers = CGFloat(max(devices.count - 1, 0))
-            let width = max(320, (geo.size.width - dividers) / CGFloat(max(devices.count, 1)))
-            ScrollView(.horizontal) {
-                HStack(alignment: .top, spacing: 0) {
-                    ForEach(Array(devices.enumerated()), id: \.element.id) { index, device in
-                        if index > 0 {
-                            Divider()
-                        }
-                        DevicePane(device: device)
-                            .frame(width: width, height: geo.size.height)
-                    }
-                }
-            }
-        }
-    }
+    private static let deviceColumnMinWidth: CGFloat = 320
 
     private var statusBar: some View {
         HStack(spacing: 12) {
@@ -505,39 +529,34 @@ private struct DevicePane: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .center, spacing: 8) {
-                    HStack(alignment: .firstTextBaseline, spacing: 8) {
-                        Label(device.kindLabel, systemImage: device.symbolName)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Text(device.name)
-                            .font(.headline)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    HStack(alignment: .center, spacing: 8) {
-                        Toggle("实时", isOn: liveBinding)
-                            .toggleStyle(.checkbox)
-                            .controlSize(.small)
-                            .foregroundStyle(.primary)
-                            .help("开启后始终显示最新日志。离开底部会关闭，滚回底部会重新开启。")
-                        Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
-                            Task { await store.toggleRecording(serial: device.serial) }
-                        }
+                DeviceToolbarLayout(spacing: 8, lineSpacing: 6) {
+                    Text(device.name)
+                        .font(.headline)
+                        .lineLimit(1)
+                    Toggle("实时", isOn: liveBinding)
+                        .toggleStyle(.checkbox)
                         .controlSize(.small)
-                        .disabled(!device.isOnline)
-                        .help(store.isPaused(device.serial) ? "从现在开始记录，暂停期间的日志不会补上" : "停止追加新日志，已有内容保留")
-                        Button("清空日志") {
-                            Task { await store.clearLogs(serial: device.serial) }
-                        }
-                        .controlSize(.small)
-                        .disabled(device.platform == .android && !device.isOnline)
-                        .help(device.platform == .ios ? "清空窗口里的日志，不会删除设备上的系统日志" : "清空这台设备的 logcat 缓冲")
-                        Rectangle()
-                            .fill(.separator)
-                            .frame(width: 1, height: 16)
-                        SingleDeviceExportMenu(device: device, compact: true)
+                        .foregroundStyle(.primary)
+                        .fixedSize()
+                        .help("开启后始终显示最新日志。离开底部会关闭，滚回底部会重新开启。")
+                    Button(store.isPaused(device.serial) ? "开始记录" : "暂停记录") {
+                        Task { await store.toggleRecording(serial: device.serial) }
                     }
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(!device.isOnline)
+                    .help(store.isPaused(device.serial) ? "从现在开始记录，暂停期间的日志不会补上" : "停止追加新日志，已有内容保留")
+                    Button("清空日志") {
+                        Task { await store.clearLogs(serial: device.serial) }
+                    }
+                    .controlSize(.small)
+                    .fixedSize()
+                    .disabled(device.platform == .android && !device.isOnline)
+                    .help(device.platform == .ios ? "清空窗口里的日志，不会删除设备上的系统日志" : "清空这台设备的 logcat 缓冲")
+                    Rectangle()
+                        .fill(.separator)
+                        .frame(width: 1, height: 16)
+                    SingleDeviceExportMenu(device: device, compact: true)
                 }
                 HStack(spacing: 6) {
                     Text(device.serial)
@@ -558,11 +577,6 @@ private struct DevicePane: View {
                 .foregroundStyle(.secondary)
                 if device.platform == .ios {
                     appFilter
-                }
-                if !device.isOnline {
-                    Text(device.stateLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 if let warning = store.warning(for: device.serial) {
                     Text(warning)
@@ -878,5 +892,99 @@ private struct DevicePane: View {
             return "已暂停"
         }
         return "等待日志…"
+    }
+}
+
+private struct DeviceToolbarLayout: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 6
+    var minimumTitleWidth: CGFloat = 72
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? intrinsicWidth(subviews)
+        let rows = arrange(maxWidth: width, subviews: subviews)
+        return CGSize(width: proposal.width ?? (rows.map(\.width).max() ?? 0), height: height(of: rows))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = arrange(maxWidth: bounds.width, subviews: subviews)
+        var y = bounds.minY
+        for row in rows {
+            var x = bounds.minX
+            for item in row.items {
+                item.subview.place(
+                    at: CGPoint(x: x, y: y + (row.height - item.size.height) / 2),
+                    anchor: .topLeading,
+                    proposal: ProposedViewSize(item.size)
+                )
+                x += item.size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Item {
+        var subview: LayoutSubview
+        var size: CGSize
+    }
+
+    private struct Row {
+        var items: [Item] = []
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    private func height(of rows: [Row]) -> CGFloat {
+        rows.reduce(0) { $0 + $1.height } + lineSpacing * CGFloat(max(rows.count - 1, 0))
+    }
+
+    private func intrinsicWidth(_ subviews: Subviews) -> CGFloat {
+        let widths = subviews.map { $0.sizeThatFits(.unspecified).width }
+        return widths.reduce(0, +) + spacing * CGFloat(max(widths.count - 1, 0))
+    }
+
+    private func arrange(maxWidth: CGFloat, subviews: Subviews) -> [Row] {
+        guard let title = subviews.first else { return [] }
+        let controls = subviews.dropFirst().map { subview in
+            Item(subview: subview, size: subview.sizeThatFits(.unspecified))
+        }
+        let controlsWidth = controls.reduce(CGFloat(0)) { $0 + $1.size.width } + spacing * CGFloat(max(controls.count - 1, 0))
+        let gap: CGFloat = controls.isEmpty ? 0 : spacing
+        let leftover = maxWidth - controlsWidth - gap
+        if leftover >= minimumTitleWidth {
+            let titleSize = measured(title, width: leftover)
+            var row = Row(items: [Item(subview: title, size: titleSize)], width: titleSize.width, height: titleSize.height)
+            append(controls, to: &row)
+            return [row]
+        }
+
+        let titleSize = measured(title, width: maxWidth)
+        var rows = [Row(items: [Item(subview: title, size: titleSize)], width: titleSize.width, height: titleSize.height)]
+        var row = Row()
+        for control in controls {
+            let needed = row.items.isEmpty ? control.size.width : row.width + spacing + control.size.width
+            if !row.items.isEmpty, needed > maxWidth {
+                rows.append(row)
+                row = Row()
+            }
+            append([control], to: &row)
+        }
+        if !row.items.isEmpty {
+            rows.append(row)
+        }
+        return rows
+    }
+
+    private func measured(_ subview: LayoutSubview, width: CGFloat) -> CGSize {
+        let height = subview.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        return CGSize(width: max(0, width), height: height)
+    }
+
+    private func append(_ items: [Item], to row: inout Row) {
+        for item in items {
+            row.width = row.items.isEmpty ? item.size.width : row.width + spacing + item.size.width
+            row.height = max(row.height, item.size.height)
+            row.items.append(item)
+        }
     }
 }
