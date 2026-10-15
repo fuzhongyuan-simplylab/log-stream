@@ -4,12 +4,12 @@ cd "$(dirname "$0")/.."
 
 swift build -c release
 
-APP="dist/Android 日志.app"
+APP="dist/移动日志.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
-cp ".build/release/AndroidLogTools" "$APP/Contents/MacOS/AndroidLogTools"
+cp ".build/release/MobileLogTools" "$APP/Contents/MacOS/MobileLogTools"
 cp "Resources/Info.plist" "$APP/Contents/Info.plist"
-chmod +x "$APP/Contents/MacOS/AndroidLogTools"
+chmod +x "$APP/Contents/MacOS/MobileLogTools"
 codesign --force --sign - "$APP"
 
 echo "已生成 $APP"

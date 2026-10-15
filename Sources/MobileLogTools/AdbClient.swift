@@ -2,23 +2,75 @@ import Darwin
 import Foundation
 import os
 
+enum DevicePlatform: String, CaseIterable, Identifiable, Sendable {
+    case android
+    case ios
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .android:
+            return "Android"
+        case .ios:
+            return "iOS"
+        }
+    }
+}
+
 struct Device: Identifiable, Hashable, Sendable {
     var id: String { serial }
+    var platform: DevicePlatform = .android
     var serial: String
     var state: String
     var name: String
     var androidVersion: String
     var apiLevel: String
     var isEmulator: Bool
+    var productType: String = ""
+    var transport: String = ""
 
     var isOnline: Bool { state == "device" }
 
-    var kindLabel: String { isEmulator ? "虚拟机" : "真机" }
+    var kindLabel: String {
+        if platform == .ios {
+            return isEmulator ? "模拟器" : "真机"
+        }
+        return isEmulator ? "虚拟机" : "真机"
+    }
 
-    var symbolName: String { isEmulator ? "desktopcomputer" : "iphone" }
+    var symbolName: String {
+        switch platform {
+        case .android:
+            return isEmulator ? "desktopcomputer" : "iphone"
+        case .ios:
+            return productType == "iPad" ? "ipad" : "iphone"
+        }
+    }
 
     var versionLabel: String {
-        "Android \(androidVersion) · API \(apiLevel)"
+        switch platform {
+        case .android:
+            return "Android \(androidVersion) · API \(apiLevel)"
+        case .ios:
+            return "iOS \(androidVersion)"
+        }
+    }
+
+    var connectionLabel: String {
+        guard platform == .ios, !isEmulator else { return "" }
+        switch transport {
+        case "localNetwork":
+            return "无线"
+        case "wired":
+            return "数据线"
+        default:
+            return ""
+        }
+    }
+
+    var caption: String {
+        connectionLabel.isEmpty ? versionLabel : "\(versionLabel) · \(connectionLabel)"
     }
 
     var stateLabel: String {
@@ -73,15 +125,25 @@ enum DeviceSortField: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
-    func title(isEmulator: Bool) -> String {
+    static func cases(for platform: DevicePlatform) -> [DeviceSortField] {
+        switch platform {
+        case .android:
+            return allCases
+        case .ios:
+            return [.name, .androidVersion, .connection]
+        }
+    }
+
+    func title(platform: DevicePlatform, isEmulator: Bool) -> String {
         switch self {
         case .name:
             return "名称"
         case .api:
             return "API"
         case .androidVersion:
-            return "Android 版本"
+            return platform == .ios ? "iOS 版本" : "Android 版本"
         case .connection:
+            if platform == .ios { return "UDID" }
             return isEmulator ? "端口" : "序列号"
         }
     }
@@ -575,13 +637,8 @@ final class LogStream: @unchecked Sendable {
         self.onEnd = onEnd
     }
 
-    func start(adbPath: String, serial: String, since: String?, pattern: String?) throws {
-        process.executableURL = URL(fileURLWithPath: adbPath)
-        let tail = since ?? (pattern == nil ? "300" : "20000")
-        var arguments = ["-s", serial, "logcat", "-v", "time", "-T", tail]
-        if let pattern {
-            arguments.append(contentsOf: ["-e", pattern])
-        }
+    func start(executable: String, arguments: [String]) throws {
+        process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
@@ -604,13 +661,38 @@ final class LogStream: @unchecked Sendable {
         lock.unlock()
         pipe.fileHandleForReading.readabilityHandler = nil
         guard process.isRunning else { return }
-        process.terminate()
         let pid = process.processIdentifier
+        let children = Self.childPIDs(of: pid)
+        process.terminate()
+        for child in children {
+            kill(child, SIGTERM)
+        }
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { [process] in
             if process.isRunning {
                 kill(pid, SIGKILL)
             }
+            for child in Self.childPIDs(of: pid) + children {
+                kill(child, SIGKILL)
+            }
         }
+    }
+
+    private static func childPIDs(of pid: Int32) -> [Int32] {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-P", String(pid)]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return []
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(decoding: data, as: UTF8.self)
+        return text.split(separator: "\n").compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
     }
 
     func discardPending() {

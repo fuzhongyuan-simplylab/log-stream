@@ -43,10 +43,10 @@ struct ContentView: View {
             await store.start()
         }
         .onChange(of: store.devices) { _, _ in
-            guard case .device(let serial) = selection else { return }
-            if !store.devices.contains(where: { $0.serial == serial }) {
-                selection = .all
-            }
+            keepVisibleSelection()
+        }
+        .onChange(of: store.platform) { _, _ in
+            keepVisibleSelection()
         }
         .sheet(isPresented: $exportPickerPresented) {
             ExportLogSheet(devices: store.emulators + store.physicalDevices)
@@ -93,7 +93,7 @@ struct ContentView: View {
             Spacer(minLength: 12)
             Toggle("实时", isOn: allLiveBinding)
                 .toggleStyle(.checkbox)
-                .disabled(store.devices.isEmpty || showingSingleDevice)
+                .disabled(store.visibleDevices.isEmpty || showingSingleDevice)
                 .help("开启后所有设备都跟随最新日志。某台设备滚离底部会单独关闭实时模式，滚回底部会重新开启。")
             Button("开始") {
                 Task { await store.startAll() }
@@ -109,15 +109,15 @@ struct ContentView: View {
                 Task { await store.clearAllLogs() }
             }
             .keyboardShortcut(.delete, modifiers: [.command, .shift])
-            .disabled(!store.hasOnlineDevice || showingSingleDevice)
-            .help("清空所有在线设备的 logcat 缓冲")
+            .disabled(clearAllDisabled || showingSingleDevice)
+            .help(store.platform == .ios ? "清空窗口里的日志，不会删除设备上的系统日志" : "清空所有在线设备的 logcat 缓冲")
             toolbarDivider
             Button("刷新设备") {
                 Task { await store.refresh() }
             }
             .keyboardShortcut("r", modifiers: .command)
-            .disabled(store.isRefreshing || store.adbMissing)
-            .help("重新检测已连接的虚拟机和真机")
+            .disabled(store.isRefreshing || refreshDisabled)
+            .help("重新检测已连接的设备")
             toolbarDivider
             exportToolbarButton
         }
@@ -168,7 +168,33 @@ struct ContentView: View {
 
     private var showingSingleDevice: Bool {
         guard case .device(let serial) = selection else { return false }
-        return store.devices.contains { $0.serial == serial }
+        return store.visibleDevices.contains { $0.serial == serial }
+    }
+
+    private var clearAllDisabled: Bool {
+        if store.platform == .ios { return store.visibleDevices.isEmpty }
+        return !store.hasOnlineDevice
+    }
+
+    private var refreshDisabled: Bool {
+        if store.platform == .ios { return store.xcrunMissing }
+        return store.adbMissing
+    }
+
+    private var platformBinding: Binding<DevicePlatform> {
+        Binding(
+            get: { store.platform },
+            set: { newValue in
+                Task { await store.selectPlatform(newValue) }
+            }
+        )
+    }
+
+    private func keepVisibleSelection() {
+        guard case .device(let serial) = selection else { return }
+        if !store.visibleDevices.contains(where: { $0.serial == serial }) {
+            selection = .all
+        }
     }
 
     private var allLiveBinding: Binding<Bool> {
@@ -180,14 +206,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private var exportToolbarButton: some View {
-        if store.devices.count == 1, let device = store.devices.first {
+        if store.visibleDevices.count == 1, let device = store.visibleDevices.first {
             SingleDeviceExportMenu(device: device)
                 .disabled(showingSingleDevice)
         } else {
             Button("导出") {
                 exportPickerPresented = true
             }
-            .disabled(store.devices.isEmpty || showingSingleDevice)
+            .disabled(store.visibleDevices.isEmpty || showingSingleDevice)
             .help("勾选设备后导出日志和设备信息")
         }
     }
@@ -195,6 +221,15 @@ struct ContentView: View {
     private var sidebar: some View {
         @Bindable var store = store
         return List(selection: $selection) {
+            Section {
+                Picker("平台", selection: platformBinding) {
+                    ForEach(DevicePlatform.allCases) { item in
+                        Text(item.title).tag(item)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
             Section {
                 Label("全部设备", systemImage: "rectangle.split.3x1")
                     .tag(SidebarItem.all)
@@ -211,10 +246,10 @@ struct ContentView: View {
                 }
             } header: {
                 listHeader(
-                    title: "虚拟机",
+                    title: store.platform == .ios ? "模拟器" : "虚拟机",
                     count: store.emulators.count,
-                    field: $store.emulatorSortField,
-                    ascending: $store.emulatorSortAscending,
+                    field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
+                    ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
                     isEmulator: true
                 )
             }
@@ -232,15 +267,15 @@ struct ContentView: View {
                 listHeader(
                     title: "真机",
                     count: store.physicalDevices.count,
-                    field: $store.physicalSortField,
-                    ascending: $store.physicalSortAscending,
+                    field: store.platform == .ios ? $store.iosPhysicalSortField : $store.physicalSortField,
+                    ascending: store.platform == .ios ? $store.iosPhysicalSortAscending : $store.physicalSortAscending,
                     isEmulator: false
                 )
             }
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 220, ideal: 260, max: 360)
-        .navigationTitle("Android 日志")
+        .navigationTitle("移动日志")
     }
 
     private func listHeader(
@@ -262,7 +297,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(device.name)
                     .lineLimit(1)
-                Text(device.versionLabel)
+                Text(device.caption)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if !device.isOnline {
@@ -292,24 +327,43 @@ struct ContentView: View {
 
     @ViewBuilder
     private var detail: some View {
-        if store.adbMissing {
+        if store.platform == .android && store.adbMissing {
             ContentUnavailableView {
                 Label("找不到 adb", systemImage: "exclamationmark.triangle")
             } description: {
                 Text("请安装 Android SDK platform-tools。常见路径是 ~/Library/Android/sdk/platform-tools/adb。")
             }
-        } else if store.devices.isEmpty {
+        } else if store.platform == .ios && store.xcrunMissing {
+            ContentUnavailableView {
+                Label("找不到 Xcode", systemImage: "exclamationmark.triangle")
+            } description: {
+                Text("请安装 Xcode，并确认 xcode-select 指向它。")
+            }
+        } else if store.visibleDevices.isEmpty {
+            let otherPlatform: DevicePlatform = store.platform == .ios ? .android : .ios
+            let otherCount = store.devices.filter { $0.platform == otherPlatform }.count
             ContentUnavailableView {
                 Label(store.isRefreshing ? "正在查找设备" : "没有已连接的设备", systemImage: "cable.connector")
             } description: {
-                Text("启动模拟器或接上真机后，点刷新设备。")
+                if otherCount > 0 {
+                    Text("这边没有 \(store.platform.title) 设备。\(otherPlatform.title) 有 \(otherCount) 台。")
+                } else if store.platform == .ios {
+                    Text("启动模拟器，或用数据线、无线调试连上 iPhone、iPad，然后点刷新设备。")
+                } else {
+                    Text("启动模拟器或接上真机后，点刷新设备。")
+                }
             } actions: {
+                if otherCount > 0 {
+                    Button("查看 \(otherPlatform.title)") {
+                        Task { await store.selectPlatform(otherPlatform) }
+                    }
+                }
                 Button("刷新设备") {
                     Task { await store.refresh() }
                 }
-                .disabled(store.isRefreshing)
+                .disabled(store.isRefreshing || refreshDisabled)
             }
-        } else if case .device(let serial) = selection, let device = store.devices.first(where: { $0.serial == serial }) {
+        } else if case .device(let serial) = selection, let device = store.visibleDevices.first(where: { $0.serial == serial }) {
             DevicePane(device: device)
                 .onAppear { findFocus.serial = serial }
         } else {
@@ -324,9 +378,9 @@ struct ContentView: View {
         return VStack(spacing: 0) {
             if !emulators.isEmpty {
                 sectionTitle(
-                    "虚拟机",
-                    field: $store.emulatorSortField,
-                    ascending: $store.emulatorSortAscending,
+                    store.platform == .ios ? "模拟器" : "虚拟机",
+                    field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
+                    ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
                     isEmulator: true
                 )
                 deviceColumns(emulators)
@@ -337,8 +391,8 @@ struct ContentView: View {
             if !phones.isEmpty {
                 sectionTitle(
                     "真机",
-                    field: $store.physicalSortField,
-                    ascending: $store.physicalSortAscending,
+                    field: store.platform == .ios ? $store.iosPhysicalSortField : $store.physicalSortField,
+                    ascending: store.platform == .ios ? $store.iosPhysicalSortAscending : $store.physicalSortAscending,
                     isEmulator: false
                 )
                 deviceColumns(phones)
@@ -369,8 +423,8 @@ struct ContentView: View {
     ) -> some View {
         HStack(spacing: 2) {
             Picker("排序", selection: field) {
-                ForEach(DeviceSortField.allCases) { item in
-                    Text(item.title(isEmulator: isEmulator)).tag(item)
+                ForEach(DeviceSortField.cases(for: store.platform)) { item in
+                    Text(item.title(platform: store.platform, isEmulator: isEmulator)).tag(item)
                 }
             }
             .pickerStyle(.menu)
@@ -477,8 +531,8 @@ private struct DevicePane: View {
                             Task { await store.clearLogs(serial: device.serial) }
                         }
                         .controlSize(.small)
-                        .disabled(!device.isOnline)
-                        .help("清空这台设备的 logcat 缓冲")
+                        .disabled(device.platform == .android && !device.isOnline)
+                        .help(device.platform == .ios ? "清空窗口里的日志，不会删除设备上的系统日志" : "清空这台设备的 logcat 缓冲")
                         Rectangle()
                             .fill(.separator)
                             .frame(width: 1, height: 16)
@@ -491,17 +545,20 @@ private struct DevicePane: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text("·")
-                    Text(device.versionLabel)
+                    Text(device.caption)
                         .lineLimit(1)
                     Spacer(minLength: 8)
                     if device.isOnline {
-                        Text(store.isPaused(device.serial) ? "已暂停" : "记录中")
+                        Text(recordingLabel)
                     }
                     Text("\(store.lineCount(for: device.serial)) 行")
                         .monospacedDigit()
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if device.platform == .ios {
+                    appFilter
+                }
                 if !device.isOnline {
                     Text(device.stateLabel)
                         .font(.caption)
@@ -567,7 +624,7 @@ private struct DevicePane: View {
                 }
             }
             .onAppear {
-                if findFocus.serial == nil || !store.devices.contains(where: { $0.serial == findFocus.serial }) {
+                if findFocus.serial == nil || !store.visibleDevices.contains(where: { $0.serial == findFocus.serial }) {
                     findFocus.serial = device.serial
                 }
             }
@@ -738,6 +795,65 @@ private struct DevicePane: View {
         searchScrollToken += 1
     }
 
+    private var appFilter: some View {
+        HStack(spacing: 8) {
+            Menu {
+                let apps = store.apps(for: device.serial)
+                if apps.isEmpty {
+                    Text(store.isLoadingApps(device.serial) ? "正在读取应用…" : "没有已安装的应用")
+                } else {
+                    ForEach(apps) { app in
+                        Toggle(app.name, isOn: appSelection(app.bundleIdentifier))
+                    }
+                }
+            } label: {
+                Text(appSelectionLabel)
+                    .lineLimit(1)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .disabled(!device.isOnline)
+            .help("选择后开始接收这些应用的日志，可多选")
+            Toggle("调试", isOn: debugBinding)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .disabled(!device.isOnline || store.selectedBundleIDs(for: device.serial).isEmpty)
+                .help("显示 Debug 级别。默认只显示 Default、Info、Error 和 Fault")
+        }
+    }
+
+    private var appSelectionLabel: String {
+        let names = store.selectedAppNames(for: device.serial)
+        if names.isEmpty { return "选择应用" }
+        if names.count == 1 { return names[0] }
+        return "已选 \(names.count) 个应用"
+    }
+
+    private var recordingLabel: String {
+        if device.platform == .ios && store.selectedBundleIDs(for: device.serial).isEmpty {
+            return "未选择应用"
+        }
+        return store.isPaused(device.serial) ? "已暂停" : "记录中"
+    }
+
+    private func appSelection(_ bundleID: String) -> Binding<Bool> {
+        Binding(
+            get: { store.selectedBundleIDs(for: device.serial).contains(bundleID) },
+            set: { selected in
+                Task { await store.setAppSelected(serial: device.serial, bundleID: bundleID, selected: selected) }
+            }
+        )
+    }
+
+    private var debugBinding: Binding<Bool> {
+        Binding(
+            get: { store.includesDebug(device.serial) },
+            set: { enabled in
+                Task { await store.setIncludesDebug(serial: device.serial, enabled: enabled) }
+            }
+        )
+    }
+
     private var liveBinding: Binding<Bool> {
         Binding(
             get: { store.isLive(device.serial) },
@@ -748,6 +864,11 @@ private struct DevicePane: View {
     private var emptyMessage: String {
         if !device.isOnline {
             return "设备\(device.stateLabel)，无法读取日志"
+        }
+        if device.platform == .ios && store.selectedBundleIDs(for: device.serial).isEmpty {
+            if store.isLoadingApps(device.serial) { return "正在读取应用…" }
+            if store.apps(for: device.serial).isEmpty { return "没有已安装的应用" }
+            return "选择应用后开始记录"
         }
         let needle = store.filter.trimmingCharacters(in: .whitespacesAndNewlines)
         if !needle.isEmpty {

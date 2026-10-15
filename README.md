@@ -1,8 +1,12 @@
-# Android 日志
+# 移动日志
 
-macOS 上的 Android 日志查看工具。通过 adb 发现已连接的模拟器和真机，实时显示 logcat，并支持按文本或正则过滤、暂停、清空和导出日志。
+macOS 上的 Android 和 iOS 日志查看工具。可以发现已连接的模拟器和真机，实时显示日志，并支持按文本或正则过滤、暂停、清空和导出。
 
-需要 macOS 14 及以上、Swift 6，以及本机可用的 adb（Android SDK platform-tools）。
+Android 通过 adb 读取 logcat。iOS 通过 Xcode 读取日志：模拟器使用 `simctl` 的 `log stream`，真机使用系统控制台同一套实时流。iOS 必须先选择一个或多个应用，日志才会开始进来。
+
+需要 macOS 14 及以上和 Swift 6。Android 需要本机可用的 adb（Android SDK platform-tools）。iOS 需要 Xcode，并且 `xcode-select` 指向它。真机需要用数据线连接，并在设备上信任这台 Mac。
+
+`print()` 只会出现在 Xcode 调试器里。这里能看到 `os_log`、`Logger` 和 `NSLog`。
 
 ## 常用命令
 
@@ -27,11 +31,11 @@ swift build -c release
 ./scripts/build-app.sh
 ```
 
-生成 `dist/Android 日志.app`。脚本会做 release 构建、组装应用包并做临时签名。
+生成 `dist/移动日志.app`。脚本会做 release 构建、组装应用包并做临时签名。
 
 **安装**：
 
 ```sh
-cp -R "dist/Android 日志.app" /Applications/
-open "/Applications/Android 日志.app"
+cp -R "dist/移动日志.app" /Applications/
+open "/Applications/移动日志.app"
 ```

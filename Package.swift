@@ -2,13 +2,13 @@
 import PackageDescription
 
 let package = Package(
-    name: "AndroidLogTools",
+    name: "MobileLogTools",
     platforms: [
         .macOS(.v14)
     ],
     targets: [
         .executableTarget(
-            name: "AndroidLogTools"
+            name: "MobileLogTools"
         )
     ]
 )
