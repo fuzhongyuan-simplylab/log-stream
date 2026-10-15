@@ -60,23 +60,23 @@ struct ContentView: View {
             Spacer(minLength: 12)
             Toggle("实时", isOn: allLiveBinding)
                 .toggleStyle(.checkbox)
-                .disabled(store.devices.isEmpty)
+                .disabled(store.devices.isEmpty || showingSingleDevice)
                 .help("开启后所有设备都跟随最新日志。某台设备滚离底部会单独关闭实时模式，滚回底部会重新开启。")
             Button("开始") {
                 Task { await store.startAll() }
             }
-            .disabled(!store.canStartAll)
+            .disabled(!store.canStartAll || showingSingleDevice)
             .help("开始所有已暂停的在线设备")
             Button("暂停") {
                 store.pauseAll()
             }
-            .disabled(!store.canPauseAll)
+            .disabled(!store.canPauseAll || showingSingleDevice)
             .help("暂停所有正在记录的在线设备。已有日志保留，暂停期间的日志不会补上")
             Button("清空") {
                 Task { await store.clearAllLogs() }
             }
             .keyboardShortcut(.delete, modifiers: [.command, .shift])
-            .disabled(!store.hasOnlineDevice)
+            .disabled(!store.hasOnlineDevice || showingSingleDevice)
             .help("清空所有在线设备的 logcat 缓冲")
             toolbarDivider
             Button("刷新设备") {
@@ -97,6 +97,11 @@ struct ContentView: View {
             .frame(height: 16)
     }
 
+    private var showingSingleDevice: Bool {
+        guard case .device(let serial) = selection else { return false }
+        return store.devices.contains { $0.serial == serial }
+    }
+
     private var allLiveBinding: Binding<Bool> {
         Binding(
             get: { store.allDevicesLive },
@@ -108,11 +113,12 @@ struct ContentView: View {
     private var exportToolbarButton: some View {
         if store.devices.count == 1, let device = store.devices.first {
             SingleDeviceExportMenu(device: device)
+                .disabled(showingSingleDevice)
         } else {
             Button("导出") {
                 exportPickerPresented = true
             }
-            .disabled(store.devices.isEmpty)
+            .disabled(store.devices.isEmpty || showingSingleDevice)
             .help("勾选设备后导出日志和设备信息")
         }
     }
