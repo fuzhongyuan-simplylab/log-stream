@@ -441,6 +441,7 @@ private struct DevicePane: View {
     @FocusState private var searchFocused: Bool
     @State private var searchVisible = false
     @State private var searchText = ""
+    @State private var appliedSearchText = ""
     @State private var searchUsesRegex = false
     @State private var matchCount = 0
     @State private var matchIndex = 0
@@ -521,7 +522,7 @@ private struct DevicePane: View {
                     lines: store.logLines(for: device.serial),
                     isLive: store.isLive(device.serial),
                     onLiveChange: { store.setLive(device.serial, $0) },
-                    searchQuery: searchVisible ? searchText : "",
+                    searchQuery: searchVisible ? appliedSearchText : "",
                     searchUsesRegex: searchUsesRegex,
                     searchMatchIndex: matchCount == 0 ? -1 : min(matchIndex, matchCount) - 1,
                     searchScrollToken: searchScrollToken,
@@ -575,15 +576,24 @@ private struct DevicePane: View {
                     findFocus.serial = device.serial
                 }
             }
-            .onChange(of: searchText) { _, _ in
+            .task(id: searchText) {
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled, searchVisible else { return }
+                appliedSearchText = searchText
+            }
+            .onChange(of: appliedSearchText) { _, _ in
                 guard searchVisible else { return }
-                matchIndex = trimmedSearch.isEmpty ? 0 : 1
+                matchIndex = appliedSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : 1
                 searchScrollToken += 1
             }
             .onChange(of: searchUsesRegex) { _, _ in
                 guard searchVisible, !trimmedSearch.isEmpty else { return }
-                matchIndex = 1
-                searchScrollToken += 1
+                if appliedSearchText != searchText {
+                    appliedSearchText = searchText
+                } else {
+                    matchIndex = 1
+                    searchScrollToken += 1
+                }
             }
             .background {
                 if isFindTarget {
@@ -599,62 +609,57 @@ private struct DevicePane: View {
     }
 
     private var searchPanel: some View {
-        HStack(spacing: 6) {
-            TextField("搜索", text: $searchText)
-                .textFieldStyle(.roundedBorder)
-                .controlSize(.small)
-                .frame(width: 200)
-                .focused($searchFocused)
-                .help(searchUsesRegex ? "正则模式，区分大小写" : "文本模式，不区分大小写")
-                .onSubmit { showNextMatch() }
-            Button {
-                searchUsesRegex.toggle()
-            } label: {
-                Image(systemName: "chevron.left.forwardslash.chevron.right")
-            }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .foregroundStyle(searchUsesRegex ? Color.accentColor : Color.secondary)
-            .help(searchUsesRegex ? "正则模式已开启，区分大小写" : "文本模式。点此改用正则")
-            .accessibilityLabel("正则")
-            findButton(
-                "上一个",
-                shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]),
-                help: "跳到当前选中匹配的上一条",
-                action: showPreviousMatch
-            )
-            findButton(
-                "下一个",
-                shortcut: KeyboardShortcut("g", modifiers: .command),
-                help: "跳到当前选中匹配的下一条",
-                action: showNextMatch
-            )
-            if !trimmedSearch.isEmpty {
-                if searchRegexInvalid {
-                    Text("正则不合法")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else {
-                    Text("\(displayedMatchIndex)/\(matchCount)")
-                        .font(.caption)
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                        .frame(minWidth: 40, alignment: .trailing)
-                        .help("当前匹配 / 匹配总数")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                TextField("搜索", text: $searchText)
+                    .textFieldStyle(.roundedBorder)
+                    .controlSize(.small)
+                    .focused($searchFocused)
+                    .help(searchUsesRegex ? "正则模式，区分大小写" : "文本模式，不区分大小写")
+                    .onSubmit { showNextMatch() }
+                    .onExitCommand { closeSearch() }
+                Button {
+                    searchUsesRegex.toggle()
+                } label: {
+                    Image(systemName: "chevron.left.forwardslash.chevron.right")
                 }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .foregroundStyle(searchUsesRegex ? Color.accentColor : Color.secondary)
+                .help(searchUsesRegex ? "正则模式已开启，区分大小写" : "文本模式。点此改用正则")
+                .accessibilityLabel("正则")
             }
-            Button {
-                searchVisible = false
-            } label: {
-                Image(systemName: "xmark.circle.fill")
+            HStack(spacing: 6) {
+                if !trimmedSearch.isEmpty {
+                    if searchRegexInvalid {
+                        Text("正则不合法")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    } else {
+                        Text("\(displayedMatchIndex)/\(matchCount)")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                            .help("当前匹配 / 匹配总数")
+                    }
+                }
+                Spacer(minLength: 12)
+                findButton(
+                    "上一个",
+                    shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]),
+                    help: "跳到当前选中匹配的上一条",
+                    action: showPreviousMatch
+                )
+                findButton(
+                    "下一个",
+                    shortcut: KeyboardShortcut("g", modifiers: .command),
+                    help: "跳到当前选中匹配的下一条",
+                    action: showNextMatch
+                )
             }
-            .buttonStyle(.borderless)
-            .controlSize(.small)
-            .foregroundStyle(.secondary)
-            .help("关闭搜索")
-            .accessibilityLabel("关闭搜索")
         }
         .padding(8)
+        .frame(width: 280)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -672,11 +677,18 @@ private struct DevicePane: View {
         return (try? NSRegularExpression(pattern: trimmedSearch)) == nil
     }
 
+    private func closeSearch() {
+        searchVisible = false
+        searchFocused = false
+    }
+
     private func toggleSearch() {
         findFocus.serial = device.serial
         searchVisible.toggle()
         guard searchVisible else { return }
-        if !trimmedSearch.isEmpty {
+        if appliedSearchText != searchText {
+            appliedSearchText = searchText
+        } else if !trimmedSearch.isEmpty {
             if matchIndex == 0 { matchIndex = 1 }
             searchScrollToken += 1
         }
