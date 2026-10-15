@@ -366,16 +366,35 @@ struct ContentView: View {
         } else if case .device(let serial) = selection, let device = store.visibleDevices.first(where: { $0.serial == serial }) {
             DevicePane(device: device)
                 .onAppear { findFocus.serial = serial }
+        } else if store.platform == .ios && boardPhones.isEmpty && boardEmulators.isEmpty {
+            ContentUnavailableView {
+                Label("没有可显示的日志", systemImage: "rectangle.split.3x1")
+            } description: {
+                Text("在侧边栏打开一台在线设备，并选择应用后，日志会显示在这里。")
+            }
         } else {
             allDevices
         }
     }
 
+    private var boardPhones: [Device] {
+        store.physicalDevices.filter(showsOnAllDevices)
+    }
+
+    private var boardEmulators: [Device] {
+        store.emulators.filter(showsOnAllDevices)
+    }
+
+    private func showsOnAllDevices(_ device: Device) -> Bool {
+        guard device.platform == .ios else { return true }
+        return device.isOnline && !store.selectedBundleIDs(for: device.serial).isEmpty
+    }
+
     private var allDevices: some View {
         @Bindable var store = store
-        let emulators = store.emulators
-        let phones = store.physicalDevices
-        let devices = emulators + phones
+        let phones = boardPhones
+        let emulators = boardEmulators
+        let devices = phones + emulators
         return GeometryReader { geo in
             let dividerWidth: CGFloat = 1
             let headerHeight: CGFloat = 40
@@ -387,23 +406,6 @@ struct ContentView: View {
             ScrollView(.horizontal) {
                 VStack(spacing: 0) {
                     HStack(spacing: 0) {
-                        if !emulators.isEmpty {
-                            sectionTitle(
-                                store.platform == .ios ? "模拟器" : "虚拟机",
-                                field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
-                                ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
-                                isEmulator: true
-                            )
-                            .frame(
-                                width: groupWidth(count: emulators.count, columnWidth: columnWidth, dividerWidth: dividerWidth),
-                                alignment: .leading
-                            )
-                        }
-                        if !emulators.isEmpty && !phones.isEmpty {
-                            Rectangle()
-                                .fill(.separator)
-                                .frame(width: dividerWidth, height: headerHeight)
-                        }
                         if !phones.isEmpty {
                             sectionTitle(
                                 "真机",
@@ -413,6 +415,23 @@ struct ContentView: View {
                             )
                             .frame(
                                 width: groupWidth(count: phones.count, columnWidth: columnWidth, dividerWidth: dividerWidth),
+                                alignment: .leading
+                            )
+                        }
+                        if !phones.isEmpty && !emulators.isEmpty {
+                            Rectangle()
+                                .fill(.separator)
+                                .frame(width: dividerWidth, height: headerHeight)
+                        }
+                        if !emulators.isEmpty {
+                            sectionTitle(
+                                store.platform == .ios ? "模拟器" : "虚拟机",
+                                field: store.platform == .ios ? $store.iosEmulatorSortField : $store.emulatorSortField,
+                                ascending: store.platform == .ios ? $store.iosEmulatorSortAscending : $store.emulatorSortAscending,
+                                isEmulator: true
+                            )
+                            .frame(
+                                width: groupWidth(count: emulators.count, columnWidth: columnWidth, dividerWidth: dividerWidth),
                                 alignment: .leading
                             )
                         }
