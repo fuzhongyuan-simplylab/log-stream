@@ -590,7 +590,7 @@ private struct DevicePane: View {
 
             ZStack {
                 LogTextView(
-                    lines: store.logLines(for: device.serial),
+                    snapshot: store.logSnapshot(for: device.serial),
                     isLive: store.isLive(device.serial),
                     onLiveChange: { store.setLive(device.serial, $0) },
                     searchQuery: searchVisible ? appliedSearchText : "",
@@ -622,7 +622,7 @@ private struct DevicePane: View {
                         matchIndex = number
                     }
                 )
-                if store.logLines(for: device.serial).isEmpty {
+                if store.logSnapshot(for: device.serial).lines.isEmpty {
                     Text(emptyMessage)
                         .font(.callout)
                         .foregroundStyle(.secondary)

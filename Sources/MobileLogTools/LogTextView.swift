@@ -47,7 +47,7 @@ enum LogSearch {
 }
 
 struct LogTextView: NSViewRepresentable {
-    var lines: [String]
+    var snapshot: LogSnapshot
     var isLive: Bool
     var onLiveChange: (Bool) -> Void
     var searchQuery: String
@@ -64,7 +64,6 @@ struct LogTextView: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        context.coordinator.lines = []
         let scrollView = LogScrollView()
         let textView = LogNSTextView()
         let scroller = MatchScroller(frame: .zero)
@@ -133,37 +132,30 @@ struct LogTextView: NSViewRepresentable {
             publishMatches(textView, scrollView: scrollView, coordinator: coordinator)
         }
 
-        let old = coordinator.lines
+        let change = coordinator.change(for: snapshot)
         let becameLive = isLive && !coordinator.wasLive
         let queryChanged = coordinator.query != searchQuery || coordinator.usesRegex != searchUsesRegex
         let indexChanged = coordinator.matchIndex != searchMatchIndex
         let shouldReveal = coordinator.scrollToken != searchScrollToken
-        let linesAppended = old != lines && !old.isEmpty && lines.starts(with: old)
-        let linesReplaced = old != lines && !linesAppended
         coordinator.wasLive = isLive
         coordinator.query = searchQuery
         coordinator.usesRegex = searchUsesRegex
         coordinator.matchIndex = searchMatchIndex
-        guard old != lines || becameLive || queryChanged || indexChanged || shouldReveal else {
+        guard change != .none || becameLive || queryChanged || indexChanged || shouldReveal else {
             if isLive {
                 scrollView.followLive()
             }
             return
         }
 
-        if linesAppended {
-            let added = lines.dropFirst(old.count).joined(separator: "\n")
-            if !added.isEmpty {
-                textView.textStorage?.append(
-                    NSAttributedString(string: "\n" + added, attributes: coordinator.attributes)
-                )
-            }
-            coordinator.lines = lines
+        if change.isGrowth {
+            apply(change, to: textView, coordinator: coordinator)
             scrollView.relayoutText()
             if isLive, !shouldReveal {
                 scrollView.followLive()
             }
-            if queryChanged || indexChanged || shouldReveal {
+            let trimmed = change.droppedLines > 0
+            if trimmed || queryChanged || indexChanged || shouldReveal {
                 scrollView.noteMatchRefreshPerformed()
                 publishMatches(textView, scrollView: scrollView, coordinator: coordinator)
                 if shouldReveal {
@@ -177,16 +169,13 @@ struct LogTextView: NSViewRepresentable {
         }
 
         let savedOrigin = scrollView.contentView.bounds.origin
-        if linesReplaced {
-            textView.string = lines.joined(separator: "\n")
-            textView.font = coordinator.font
-            textView.textColor = .labelColor
-            coordinator.lines = lines
+        if change == .replace {
+            replaceText(snapshot.lines, in: textView, coordinator: coordinator)
             scrollView.noteMatchRefreshPerformed()
         }
 
         scrollView.relayoutText()
-        if queryChanged || linesReplaced || indexChanged || shouldReveal {
+        if queryChanged || change == .replace || indexChanged || shouldReveal {
             if queryChanged {
                 scrollView.noteMatchRefreshPerformed()
             }
@@ -199,7 +188,7 @@ struct LogTextView: NSViewRepresentable {
 
         if isLive, !shouldReveal {
             scrollView.followLive()
-        } else if linesReplaced, !shouldReveal {
+        } else if change == .replace, !shouldReveal {
             scrollView.programmaticScroll = true
             scrollView.contentView.scroll(to: savedOrigin)
             scrollView.reflectScrolledClipView(scrollView.contentView)
@@ -218,7 +207,9 @@ struct LogTextView: NSViewRepresentable {
     }
 
     final class Coordinator {
-        var lines: [String] = []
+        var revision = 0
+        var dropped = 0
+        var count = 0
         var wasLive = true
         var query = ""
         var usesRegex = false
@@ -232,6 +223,99 @@ struct LogTextView: NSViewRepresentable {
                 .font: font,
                 .foregroundColor: NSColor.labelColor
             ]
+        }
+
+        enum Change: Equatable {
+            case none
+            case append(Int)
+            case trim(dropped: Int, appended: Int)
+            case replace
+
+            var isGrowth: Bool {
+                switch self {
+                case .append, .trim:
+                    return true
+                case .none, .replace:
+                    return false
+                }
+            }
+
+            var droppedLines: Int {
+                if case .trim(let dropped, _) = self { return dropped }
+                return 0
+            }
+        }
+
+        func change(for snapshot: LogSnapshot) -> Change {
+            if snapshot.revision != revision { return .replace }
+            let droppedDelta = snapshot.dropped - dropped
+            if droppedDelta < 0 { return .replace }
+            let appended = snapshot.count - (count - droppedDelta)
+            if appended < 0 { return .replace }
+            if droppedDelta == 0 {
+                return appended == 0 ? .none : .append(appended)
+            }
+            return .trim(dropped: droppedDelta, appended: appended)
+        }
+
+        func noteApplied(_ snapshot: LogSnapshot) {
+            revision = snapshot.revision
+            dropped = snapshot.dropped
+            count = snapshot.count
+        }
+    }
+
+    private func apply(_ change: Coordinator.Change, to textView: NSTextView, coordinator: Coordinator) {
+        guard let storage = textView.textStorage else {
+            coordinator.noteApplied(snapshot)
+            return
+        }
+        storage.beginEditing()
+        switch change {
+        case .append(let count):
+            append(snapshot.lines.suffix(count), to: storage, coordinator: coordinator)
+        case .trim(let dropped, let appended):
+            deletePrefixLines(dropped, in: storage)
+            if appended > 0 {
+                append(snapshot.lines.suffix(appended), to: storage, coordinator: coordinator)
+            }
+        case .none, .replace:
+            break
+        }
+        storage.endEditing()
+        coordinator.noteApplied(snapshot)
+    }
+
+    private func replaceText(_ lines: [String], in textView: NSTextView, coordinator: Coordinator) {
+        textView.string = lines.joined(separator: "\n")
+        textView.font = coordinator.font
+        textView.textColor = .labelColor
+        coordinator.noteApplied(snapshot)
+    }
+
+    private func append(_ lines: some Sequence<String>, to storage: NSTextStorage, coordinator: Coordinator) {
+        let added = lines.joined(separator: "\n")
+        guard !added.isEmpty else { return }
+        let prefix = storage.length > 0 ? "\n" : ""
+        storage.append(NSAttributedString(string: prefix + added, attributes: coordinator.attributes))
+    }
+
+    private func deletePrefixLines(_ lineCount: Int, in storage: NSTextStorage) {
+        guard lineCount > 0, storage.length > 0 else { return }
+        let text = storage.string as NSString
+        var found = 0
+        var index = 0
+        while found < lineCount, index < text.length {
+            let next = text.range(of: "\n", range: NSRange(location: index, length: text.length - index))
+            if next.location == NSNotFound {
+                storage.deleteCharacters(in: NSRange(location: 0, length: text.length))
+                return
+            }
+            found += 1
+            index = next.location + next.length
+        }
+        if index > 0 {
+            storage.deleteCharacters(in: NSRange(location: 0, length: index))
         }
     }
 

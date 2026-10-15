@@ -1,6 +1,34 @@
 import Foundation
 import Observation
 
+/// 一份设备日志。`revision` 在清空时增加，`dropped` 累计从开头丢掉的行数，用来让文本视图删前缀而不是重写全文。
+struct LogSnapshot: Equatable, Sendable {
+    private(set) var revision = 0
+    private(set) var dropped = 0
+    private(set) var lines: [String] = []
+
+    static let limit = 10_000
+    static let slack = 2_000
+
+    var count: Int { lines.count }
+
+    mutating func clear() {
+        lines.removeAll(keepingCapacity: false)
+        dropped = 0
+        revision += 1
+    }
+
+    mutating func append(_ accepted: [String]) {
+        guard !accepted.isEmpty else { return }
+        lines.append(contentsOf: accepted)
+        let ceiling = Self.limit + Self.slack
+        guard lines.count > ceiling else { return }
+        let remove = lines.count - Self.limit
+        lines.removeFirst(remove)
+        dropped += remove
+    }
+}
+
 @MainActor
 @Observable
 final class DeviceStore {
@@ -41,7 +69,7 @@ final class DeviceStore {
     private(set) var exportNotice: String?
     private(set) var adbPath = ""
 
-    private var lines: [String: [String]] = [:]
+    private var logs: [String: LogSnapshot] = [:]
     private var streamWarnings: [String: String] = [:]
     private var streams: [String: LogStream] = [:]
     private var iosStreams: [String: IOSDeviceLogStream] = [:]
@@ -74,8 +102,6 @@ final class DeviceStore {
     private static let iosPhysicalSortAscendingKey = "iosPhysicalSortAscending"
     private static let platformKey = "logPlatform"
     private static let includeDebugKey = "iosIncludeDebug"
-    private static let shownLimit = 10_000
-    private static let shownSlack = 100
 
     init() {
         let defaults = UserDefaults.standard
@@ -225,8 +251,8 @@ final class DeviceStore {
         for serial in Array(streams.keys) + Array(iosStreams.keys) where !foundIDs.contains(serial) {
             stopStream(serial: serial, intentional: true)
         }
-        for serial in Array(lines.keys) where !foundIDs.contains(serial) {
-            lines[serial] = nil
+        for serial in Array(logs.keys) where !foundIDs.contains(serial) {
+            logs[serial] = nil
             streamWarnings[serial] = nil
         }
         startedSerials = startedSerials.intersection(foundIDs)
@@ -259,7 +285,7 @@ final class DeviceStore {
         filterRegex = Self.compiledFilter(filter, usesRegex: usesRegex)
         filterGeneration += 1
         for device in visibleDevices {
-            lines[device.serial] = []
+            clearStoredLog(device.serial)
         }
         for device in visibleDevices where device.isOnline && !paused.contains(device.serial) {
             streams[device.serial]?.discardPending()
@@ -273,7 +299,7 @@ final class DeviceStore {
         guard let device = devices.first(where: { $0.serial == serial }) else { return }
         streams[serial]?.discardPending()
         iosStreams[serial]?.discardPending()
-        lines[serial] = []
+        clearStoredLog(serial)
         guard device.platform == .android else {
             errorMessage = nil
             return
@@ -281,7 +307,7 @@ final class DeviceStore {
         guard let client else { return }
         do {
             try await client.clearLogcat(serial: serial)
-            lines[serial] = []
+            clearStoredLog(serial)
             errorMessage = nil
         } catch {
             errorMessage = "清空 \(device.name) 失败：\(error.localizedDescription)"
@@ -296,14 +322,14 @@ final class DeviceStore {
             for device in targets {
                 iosStreams[device.serial]?.discardPending()
                 streams[device.serial]?.discardPending()
-                lines[device.serial] = []
+                clearStoredLog(device.serial)
             }
             return
         }
         guard let client else { return }
         for device in targets {
             streams[device.serial]?.discardPending()
-            lines[device.serial] = []
+            clearStoredLog(device.serial)
         }
 
         var failures: [String] = []
@@ -326,7 +352,7 @@ final class DeviceStore {
         }
 
         for device in targets {
-            lines[device.serial] = []
+            clearStoredLog(device.serial)
         }
         if !failures.isEmpty {
             errorMessage = failures.joined(separator: " ")
@@ -366,7 +392,7 @@ final class DeviceStore {
     func setIncludesDebug(serial: String, enabled: Bool) async {
         includeDebug[serial] = enabled
         UserDefaults.standard.set(includeDebug, forKey: Self.includeDebugKey)
-        lines[serial] = []
+        clearStoredLog(serial)
         guard let device = devices.first(where: { $0.serial == serial }),
               device.platform == platform,
               device.isOnline,
@@ -376,8 +402,12 @@ final class DeviceStore {
         scheduleIOSRestart(for: device)
     }
 
+    func logSnapshot(for serial: String) -> LogSnapshot {
+        logs[serial] ?? LogSnapshot()
+    }
+
     func logLines(for serial: String) -> [String] {
-        lines[serial] ?? []
+        logSnapshot(for: serial).lines
     }
 
     func exportText(for devices: [Device]) -> String {
@@ -440,7 +470,13 @@ final class DeviceStore {
     }
 
     func lineCount(for serial: String) -> Int {
-        lines[serial]?.count ?? 0
+        logs[serial]?.count ?? 0
+    }
+
+    private func clearStoredLog(_ serial: String) {
+        var snapshot = logs[serial] ?? LogSnapshot()
+        snapshot.clear()
+        logs[serial] = snapshot
     }
 
     func warning(for serial: String) -> String? {
@@ -466,12 +502,9 @@ final class DeviceStore {
         guard !paused.contains(serial) else { return }
         let accepted = newLines.filter { matches($0) }
         guard !accepted.isEmpty else { return }
-        var shown = lines[serial] ?? []
-        shown.append(contentsOf: accepted)
-        if shown.count > Self.shownLimit + Self.shownSlack {
-            shown.removeFirst(shown.count - Self.shownLimit)
-        }
-        lines[serial] = shown
+        var snapshot = logs[serial] ?? LogSnapshot()
+        snapshot.append(accepted)
+        logs[serial] = snapshot
     }
 
     private func startStream(for device: Device, fromNow: Bool, force: Bool = false) async {
