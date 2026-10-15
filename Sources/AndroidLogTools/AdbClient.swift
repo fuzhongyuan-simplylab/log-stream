@@ -501,6 +501,56 @@ final class AdbClient: Sendable {
     }
 }
 
+enum LogcatFilter {
+    static func expression(for filter: String) -> String? {
+        let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        var pattern = ""
+        for scalar in needle.unicodeScalars {
+            guard scalar.isASCII, let ascii = ASCII(scalar.value) else {
+                pattern += escaped(scalar)
+                continue
+            }
+            if ascii.isLetter {
+                pattern += "[\(Character(UnicodeScalar(ascii.upper)))\(Character(UnicodeScalar(ascii.lower)))]"
+            } else {
+                pattern += escaped(scalar)
+            }
+        }
+        return pattern
+    }
+
+    private static func escaped(_ scalar: Unicode.Scalar) -> String {
+        let specials: Set<Unicode.Scalar> = ["\\", "^", "$", ".", "|", "?", "*", "+", "(", ")", "[", "]", "{", "}"]
+        let text = String(scalar)
+        return specials.contains(scalar) ? "\\\(text)" : text
+    }
+
+    private struct ASCII {
+        let upper: UInt8
+        let lower: UInt8
+        let isLetter: Bool
+
+        init?(_ value: UInt32) {
+            guard value < 128 else { return nil }
+            let byte = UInt8(value)
+            if byte >= 65 && byte <= 90 {
+                upper = byte
+                lower = byte + 32
+                isLetter = true
+            } else if byte >= 97 && byte <= 122 {
+                upper = byte - 32
+                lower = byte
+                isLetter = true
+            } else {
+                upper = byte
+                lower = byte
+                isLetter = false
+            }
+        }
+    }
+}
+
 final class LogStream: @unchecked Sendable {
     private let process = Process()
     private let pipe = Pipe()
@@ -517,9 +567,14 @@ final class LogStream: @unchecked Sendable {
         self.onEnd = onEnd
     }
 
-    func start(adbPath: String, serial: String, since: String?) throws {
+    func start(adbPath: String, serial: String, since: String?, pattern: String?) throws {
         process.executableURL = URL(fileURLWithPath: adbPath)
-        process.arguments = ["-s", serial, "logcat", "-v", "time", "-T", since ?? "300"]
+        let tail = since ?? (pattern == nil ? "300" : "20000")
+        var arguments = ["-s", serial, "logcat", "-v", "time", "-T", tail]
+        if let pattern {
+            arguments.append(contentsOf: ["-e", pattern])
+        }
+        process.arguments = arguments
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
         process.standardInput = FileHandle.nullDevice

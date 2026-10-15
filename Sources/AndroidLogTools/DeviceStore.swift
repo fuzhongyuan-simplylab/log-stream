@@ -25,7 +25,6 @@ final class DeviceStore {
     private(set) var adbPath = ""
 
     private var lines: [String: [String]] = [:]
-    private var raw: [String: [String]] = [:]
     private var streamWarnings: [String: String] = [:]
     private var streams: [String: LogStream] = [:]
     private var intentionalStop: Set<String> = []
@@ -35,14 +34,15 @@ final class DeviceStore {
     private var starting: Set<String> = []
     private var client: AdbClient?
     private var didStart = false
+    private var appliedLogcatExpression: String?
+    private var filterGeneration = 0
+    private var filterApplyTask: Task<Void, Never>?
 
     private static let filterKey = "logFilter"
     private static let emulatorSortFieldKey = "emulatorSortField"
     private static let emulatorSortAscendingKey = "emulatorSortAscending"
     private static let physicalSortFieldKey = "physicalSortField"
     private static let physicalSortAscendingKey = "physicalSortAscending"
-    private static let rawLimit = 20_000
-    private static let rawSlack = 2_000
     private static let shownLimit = 10_000
     private static let shownSlack = 100
 
@@ -53,6 +53,7 @@ final class DeviceStore {
         emulatorSortAscending = defaults.object(forKey: Self.emulatorSortAscendingKey) as? Bool ?? true
         physicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.physicalSortFieldKey) ?? "") ?? .name
         physicalSortAscending = defaults.object(forKey: Self.physicalSortAscendingKey) as? Bool ?? true
+        appliedLogcatExpression = LogcatFilter.expression(for: filter)
     }
 
     var emulators: [Device] {
@@ -155,7 +156,6 @@ final class DeviceStore {
             }
             for serial in Array(lines.keys) where !foundIDs.contains(serial) {
                 lines[serial] = nil
-                raw[serial] = nil
                 streamWarnings[serial] = nil
             }
             startedSerials = startedSerials.intersection(foundIDs)
@@ -177,18 +177,21 @@ final class DeviceStore {
 
     func filterDidChange() {
         UserDefaults.standard.set(filter, forKey: Self.filterKey)
-        refilter()
+        filterApplyTask?.cancel()
+        filterApplyTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            await restartStreamsForFilter()
+        }
     }
 
     func clearLogs(serial: String) async {
         guard let client else { return }
         let name = devices.first(where: { $0.serial == serial })?.name ?? serial
         streams[serial]?.discardPending()
-        raw[serial] = []
         lines[serial] = []
         do {
             try await client.clearLogcat(serial: serial)
-            raw[serial] = []
             lines[serial] = []
             errorMessage = nil
         } catch {
@@ -203,7 +206,6 @@ final class DeviceStore {
         errorMessage = nil
         for device in targets {
             streams[device.serial]?.discardPending()
-            raw[device.serial] = []
             lines[device.serial] = []
         }
 
@@ -227,7 +229,6 @@ final class DeviceStore {
         }
 
         for device in targets {
-            raw[device.serial] = []
             lines[device.serial] = []
         }
         if !failures.isEmpty {
@@ -332,12 +333,27 @@ final class DeviceStore {
         streamWarnings[serial]
     }
 
-    private func refilter() {
-        let current = filter
-        for serial in raw.keys {
-            let matched = (raw[serial] ?? []).filter { Self.matches($0, filter: current) }
-            lines[serial] = Array(matched.suffix(Self.shownLimit))
+    private func restartStreamsForFilter() async {
+        let expression = LogcatFilter.expression(for: filter)
+        guard expression != appliedLogcatExpression else { return }
+        appliedLogcatExpression = expression
+        filterGeneration += 1
+        for device in devices {
+            let serial = device.serial
+            if device.isOnline && !paused.contains(serial) {
+                streams[serial]?.discardPending()
+                stopStream(serial: serial, intentional: true)
+                lines[serial] = []
+                await startStream(for: device, fromNow: false, force: true)
+            } else {
+                refilter(serial)
+            }
         }
+    }
+
+    private func refilter(_ serial: String) {
+        let matched = (lines[serial] ?? []).filter { Self.matches($0, filter: filter) }
+        lines[serial] = Array(matched.suffix(Self.shownLimit))
     }
 
     private func startRecording(serial: String) async {
@@ -354,33 +370,25 @@ final class DeviceStore {
     }
 
     private func append(serial: String, newLines: [String]) {
-        guard !paused.contains(serial), !newLines.isEmpty else { return }
-        var buffer = raw[serial] ?? []
-        buffer.append(contentsOf: newLines)
-        if buffer.count > Self.rawLimit + Self.rawSlack {
-            buffer.removeFirst(buffer.count - Self.rawLimit)
-        }
-        raw[serial] = buffer
-
+        guard !paused.contains(serial) else { return }
+        let accepted = newLines.filter { Self.matches($0, filter: filter) }
+        guard !accepted.isEmpty else { return }
         var shown = lines[serial] ?? []
-        var changed = false
-        for line in newLines where Self.matches(line, filter: filter) {
-            shown.append(line)
-            changed = true
-        }
+        shown.append(contentsOf: accepted)
         if shown.count > Self.shownLimit + Self.shownSlack {
             shown.removeFirst(shown.count - Self.shownLimit)
-            changed = true
         }
-        if changed {
-            lines[serial] = shown
-        }
+        lines[serial] = shown
     }
 
-    private func startStream(for device: Device, fromNow: Bool) async {
+    private func startStream(for device: Device, fromNow: Bool, force: Bool = false) async {
         guard let client, device.isOnline else { return }
         let serial = device.serial
-        guard streams[serial] == nil, !starting.contains(serial), !paused.contains(serial) else { return }
+        guard !paused.contains(serial) else { return }
+        if !force {
+            guard streams[serial] == nil, !starting.contains(serial) else { return }
+        }
+        let token = filterGeneration
         starting.insert(serial)
         defer { starting.remove(serial) }
 
@@ -389,9 +397,15 @@ final class DeviceStore {
         } else {
             nil
         }
-        guard streams[serial] == nil, !paused.contains(serial) else { return }
+        guard token == filterGeneration, !paused.contains(serial) else { return }
+        if force || streams[serial] != nil {
+            streams[serial]?.discardPending()
+            stopStream(serial: serial, intentional: true)
+        }
+        guard streams[serial] == nil else { return }
 
         streamWarnings[serial] = nil
+        let pattern = LogcatFilter.expression(for: filter)
         let stream = LogStream(
             onLines: { [weak self] lines in
                 Task { @MainActor in
@@ -405,8 +419,8 @@ final class DeviceStore {
             }
         )
         do {
-            try stream.start(adbPath: client.path, serial: serial, since: since)
-            guard !paused.contains(serial) else {
+            try stream.start(adbPath: client.path, serial: serial, since: since, pattern: pattern)
+            guard token == filterGeneration, !paused.contains(serial) else {
                 stream.stop()
                 return
             }

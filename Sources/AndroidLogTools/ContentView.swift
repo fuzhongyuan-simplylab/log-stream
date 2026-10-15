@@ -49,7 +49,7 @@ struct ContentView: View {
             TextField("例如 KeyboardHeight", text: $store.filter)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 220, maxWidth: 360)
-                .help("不区分大小写，匹配整行日志。留空则显示全部。下次打开会记住。")
+                .help("不区分大小写，按日志内容过滤后再抓取。留空则显示全部。下次打开会记住。")
             if !store.filter.isEmpty {
                 Button("清除") {
                     store.filter = ""
