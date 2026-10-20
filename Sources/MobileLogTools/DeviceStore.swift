@@ -291,7 +291,8 @@ final class DeviceStore {
             if device.isOnline && !paused.contains(device.serial) {
                 let fromNow = startedSerials.contains(device.serial)
                 startedSerials.insert(device.serial)
-                await startStream(for: device, fromNow: fromNow)
+                // 断开的 iOS 流不会自行消失，刷新时必须重开，不能沿用旧连接。
+                await startStream(for: device, fromNow: fromNow, force: device.platform == .ios)
             } else if !device.isOnline {
                 stopStream(serial: device.serial, intentional: true)
             }
