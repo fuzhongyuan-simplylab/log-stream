@@ -252,10 +252,13 @@ final class DeviceStore {
         if syncActiveFilter() {
             filterGeneration += 1
         }
-        if let text, await applyFilter(text, usesRegex: usesRegex) {
-            return
+        if let text {
+            _ = await applyFilter(text, usesRegex: usesRegex)
         }
-        await resumeVisibleStreams(fromNow: true)
+        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) {
+            startedSerials.insert(device.serial)
+        }
+        await refresh()
     }
 
     func refresh() async {
@@ -782,13 +785,6 @@ final class DeviceStore {
         appliedLogcatExpression = LogcatFilter.expression(for: text, usesRegex: usesRegex)
         filterRegex = Self.compiledFilter(text, usesRegex: usesRegex)
         return changed
-    }
-
-    private func resumeVisibleStreams(fromNow: Bool) async {
-        for device in visibleDevices where device.isOnline && !paused.contains(device.serial) {
-            startedSerials.insert(device.serial)
-            await startStream(for: device, fromNow: fromNow)
-        }
     }
 
     private func stopStreams(on platform: DevicePlatform) {
