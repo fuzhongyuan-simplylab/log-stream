@@ -1,0 +1,13 @@
+---
+description: 改动应用后构建并替换本机 Logstream，然后删除 dist
+alwaysApply: true
+---
+
+# 更新本机 App
+
+改动 `Sources/`、`Resources/` 或 `scripts/build-app.sh` 后，用下面的步骤更新已安装的 Logstream。只改文档或本规则时不用做。
+
+1. 运行 `./scripts/build-app.sh`，生成 `dist/Logstream.app`。
+2. 如果 `/Applications/Logstream.app` 正在运行，先让它退出。
+3. 删除 `/Applications/Logstream.app`，再把 `dist/Logstream.app` 复制过去，然后打开它。
+4. 删除 `dist`。不要把这些打包产物留在仓库里，也不要提交。
