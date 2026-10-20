@@ -16,8 +16,8 @@ struct ContentView: View {
     @State private var findFocus = LogFindFocus()
     @State private var selection: SidebarItem? = .all
     @State private var exportPickerPresented = false
-    @State private var filterInput = ""
-    @State private var filterInputUsesRegex = false
+    @State private var filterInputs: [DevicePlatform: String] = [:]
+    @State private var filterUsesRegexInputs: [DevicePlatform: Bool] = [:]
     @State private var didLoadFilterDraft = false
 
     var body: some View {
@@ -35,11 +35,7 @@ struct ContentView: View {
         .environment(findFocus)
         .frame(minWidth: 960, minHeight: 560)
         .task {
-            if !didLoadFilterDraft {
-                filterInput = store.filter
-                filterInputUsesRegex = store.filterUsesRegex
-                didLoadFilterDraft = true
-            }
+            ensureFilterDraftsLoaded()
             await store.start()
         }
         .onChange(of: store.devices) { _, _ in
@@ -55,13 +51,16 @@ struct ContentView: View {
 
     private func controlBar(store: DeviceStore) -> some View {
         HStack(spacing: 10) {
-            TextField("输入过滤条件", text: $filterInput)
+            TextField("输入过滤条件", text: filterInputBinding)
                 .textFieldStyle(.roundedBorder)
                 .frame(minWidth: 220, maxWidth: 360)
                 .help(filterFieldHelp)
                 .onSubmit { Task { await applyFilterDraft() } }
+                .id(store.platform)
             Button {
-                filterInputUsesRegex.toggle()
+                ensureFilterDraftsLoaded()
+                let enabled = filterUsesRegexInputs[store.platform] ?? false
+                setDraftUsesRegex(!enabled, for: store.platform)
             } label: {
                 Image(systemName: "chevron.left.forwardslash.chevron.right")
             }
@@ -130,8 +129,61 @@ struct ContentView: View {
             .frame(height: 16)
     }
 
+    private var filterInputBinding: Binding<String> {
+        Binding(
+            get: { draftText(for: store.platform) },
+            set: { newValue in
+                ensureFilterDraftsLoaded()
+                setDraftText(newValue, for: store.platform)
+            }
+        )
+    }
+
     private var trimmedFilterInput: String {
-        filterInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        draftText(for: store.platform).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var filterInputUsesRegex: Bool {
+        draftUsesRegex(for: store.platform)
+    }
+
+    private func draftText(for platform: DevicePlatform) -> String {
+        if didLoadFilterDraft {
+            return filterInputs[platform] ?? ""
+        }
+        return store.appliedFilter(for: platform)
+    }
+
+    private func draftUsesRegex(for platform: DevicePlatform) -> Bool {
+        if didLoadFilterDraft {
+            return filterUsesRegexInputs[platform] ?? false
+        }
+        return store.appliedFilterUsesRegex(for: platform)
+    }
+
+    private func setDraftText(_ text: String, for platform: DevicePlatform) {
+        var texts = filterInputs
+        texts[platform] = text
+        filterInputs = texts
+    }
+
+    private func setDraftUsesRegex(_ usesRegex: Bool, for platform: DevicePlatform) {
+        var flags = filterUsesRegexInputs
+        flags[platform] = usesRegex
+        filterUsesRegexInputs = flags
+    }
+
+    private func ensureFilterDraftsLoaded() {
+        guard !didLoadFilterDraft else { return }
+        var texts: [DevicePlatform: String] = [:]
+        var flags: [DevicePlatform: Bool] = [:]
+        for item in DevicePlatform.allCases {
+            texts[item] = store.appliedFilter(for: item)
+            flags[item] = store.appliedFilterUsesRegex(for: item)
+        }
+        filterInputs = texts
+        filterUsesRegexInputs = flags
+        didLoadFilterDraft = true
     }
 
     private var filterRegexIsInvalid: Bool {
@@ -155,15 +207,35 @@ struct ContentView: View {
     }
 
     private func clearFilter() {
-        filterInput = ""
+        ensureFilterDraftsLoaded()
+        setDraftText("", for: store.platform)
         guard !store.filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         Task { await store.applyFilter("", usesRegex: store.filterUsesRegex) }
     }
 
     private func applyFilterDraft() async {
+        ensureFilterDraftsLoaded()
         guard !filterDraftMatchesApplied, !filterRegexIsInvalid else { return }
-        await store.applyFilter(trimmedFilterInput, usesRegex: filterInputUsesRegex)
-        filterInput = store.filter
+        let platform = store.platform
+        let applied = await store.applyFilter(trimmedFilterInput, usesRegex: filterInputUsesRegex)
+        guard applied, store.platform == platform else { return }
+        setDraftText(store.filter, for: platform)
+    }
+
+    private func changePlatform(to newPlatform: DevicePlatform) async {
+        ensureFilterDraftsLoaded()
+        let current = store.platform
+        guard newPlatform != current else { return }
+        let currentText = (filterInputs[current] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let targetText = (filterInputs[newPlatform] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentRegex = filterUsesRegexInputs[current] ?? false
+        if !currentText.isEmpty && targetText.isEmpty {
+            setDraftText(currentText, for: newPlatform)
+            setDraftUsesRegex(currentRegex, for: newPlatform)
+            await store.selectPlatform(newPlatform, adopting: currentText, usesRegex: currentRegex)
+            return
+        }
+        await store.selectPlatform(newPlatform)
     }
 
     private var showingSingleDevice: Bool {
@@ -185,7 +257,7 @@ struct ContentView: View {
         Binding(
             get: { store.platform },
             set: { newValue in
-                Task { await store.selectPlatform(newValue) }
+                Task { await changePlatform(to: newValue) }
             }
         )
     }
@@ -355,7 +427,7 @@ struct ContentView: View {
             } actions: {
                 if otherCount > 0 {
                     Button("查看 \(otherPlatform.title)") {
-                        Task { await store.selectPlatform(otherPlatform) }
+                        Task { await changePlatform(to: otherPlatform) }
                     }
                 }
                 Button("刷新设备") {

@@ -35,6 +35,8 @@ final class DeviceStore {
     private(set) var devices: [Device] = []
     var filter: String
     var filterUsesRegex: Bool
+    private var filtersByPlatform: [DevicePlatform: String] = [:]
+    private var filterUsesRegexByPlatform: [DevicePlatform: Bool] = [:]
     var emulatorSortField: DeviceSortField {
         didSet { UserDefaults.standard.set(emulatorSortField.rawValue, forKey: Self.emulatorSortFieldKey) }
     }
@@ -92,6 +94,14 @@ final class DeviceStore {
 
     private static let filterKey = "logFilter"
     private static let filterRegexKey = "logFilterUsesRegex"
+
+    private static func filterTextKey(_ platform: DevicePlatform) -> String {
+        "\(filterKey).\(platform.rawValue)"
+    }
+
+    private static func filterUsesRegexKey(_ platform: DevicePlatform) -> String {
+        "\(filterRegexKey).\(platform.rawValue)"
+    }
     private static let emulatorSortFieldKey = "emulatorSortField"
     private static let emulatorSortAscendingKey = "emulatorSortAscending"
     private static let physicalSortFieldKey = "physicalSortField"
@@ -105,8 +115,9 @@ final class DeviceStore {
 
     init() {
         let defaults = UserDefaults.standard
-        filter = defaults.string(forKey: Self.filterKey) ?? ""
-        filterUsesRegex = defaults.bool(forKey: Self.filterRegexKey)
+        let storedFilters = Self.loadFilters(from: defaults)
+        filtersByPlatform = storedFilters.texts
+        filterUsesRegexByPlatform = storedFilters.flags
         emulatorSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.emulatorSortFieldKey) ?? "") ?? .connection
         emulatorSortAscending = defaults.object(forKey: Self.emulatorSortAscendingKey) as? Bool ?? true
         physicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.physicalSortFieldKey) ?? "") ?? .name
@@ -115,12 +126,23 @@ final class DeviceStore {
         iosEmulatorSortAscending = defaults.object(forKey: Self.iosEmulatorSortAscendingKey) as? Bool ?? true
         iosPhysicalSortField = DeviceSortField(rawValue: defaults.string(forKey: Self.iosPhysicalSortFieldKey) ?? "") ?? .name
         iosPhysicalSortAscending = defaults.object(forKey: Self.iosPhysicalSortAscendingKey) as? Bool ?? true
-        platform = DevicePlatform(rawValue: defaults.string(forKey: Self.platformKey) ?? "") ?? .android
+        let selectedPlatform = DevicePlatform(rawValue: defaults.string(forKey: Self.platformKey) ?? "") ?? .android
+        filter = storedFilters.texts[selectedPlatform] ?? ""
+        filterUsesRegex = storedFilters.flags[selectedPlatform] ?? false
+        platform = selectedPlatform
         if let stored = defaults.dictionary(forKey: Self.includeDebugKey) as? [String: Bool] {
             includeDebug = stored
         }
         appliedLogcatExpression = LogcatFilter.expression(for: filter, usesRegex: filterUsesRegex)
         filterRegex = Self.compiledFilter(filter, usesRegex: filterUsesRegex)
+    }
+
+    func appliedFilter(for platform: DevicePlatform) -> String {
+        filtersByPlatform[platform] ?? ""
+    }
+
+    func appliedFilterUsesRegex(for platform: DevicePlatform) -> Bool {
+        filterUsesRegexByPlatform[platform] ?? false
     }
 
     var visibleDevices: [Device] {
@@ -223,10 +245,16 @@ final class DeviceStore {
         await refresh()
     }
 
-    func selectPlatform(_ newPlatform: DevicePlatform) async {
+    func selectPlatform(_ newPlatform: DevicePlatform, adopting text: String? = nil, usesRegex: Bool = false) async {
         guard newPlatform != platform else { return }
         stopStreams(on: platform)
         platform = newPlatform
+        if syncActiveFilter() {
+            filterGeneration += 1
+        }
+        if let text, await applyFilter(text, usesRegex: usesRegex) {
+            return
+        }
         await resumeVisibleStreams(fromNow: true)
     }
 
@@ -270,17 +298,20 @@ final class DeviceStore {
         }
     }
 
-    func applyFilter(_ text: String, usesRegex: Bool) async {
+    @discardableResult
+    func applyFilter(_ text: String, usesRegex: Bool) async -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard LogcatFilter.isValid(trimmed, usesRegex: usesRegex) else { return }
+        guard LogcatFilter.isValid(trimmed, usesRegex: usesRegex) else { return false }
         let expression = LogcatFilter.expression(for: trimmed, usesRegex: usesRegex)
         let unchanged = trimmed == filter.trimmingCharacters(in: .whitespacesAndNewlines)
             && (trimmed.isEmpty || usesRegex == filterUsesRegex)
-        guard !unchanged else { return }
+        guard !unchanged else { return false }
         filter = trimmed
         filterUsesRegex = usesRegex
-        UserDefaults.standard.set(filter, forKey: Self.filterKey)
-        UserDefaults.standard.set(filterUsesRegex, forKey: Self.filterRegexKey)
+        filtersByPlatform[platform] = trimmed
+        filterUsesRegexByPlatform[platform] = usesRegex
+        UserDefaults.standard.set(trimmed, forKey: Self.filterTextKey(platform))
+        UserDefaults.standard.set(usesRegex, forKey: Self.filterUsesRegexKey(platform))
         appliedLogcatExpression = expression
         filterRegex = Self.compiledFilter(filter, usesRegex: usesRegex)
         filterGeneration += 1
@@ -293,6 +324,7 @@ final class DeviceStore {
             stopStream(serial: device.serial, intentional: true)
             await startStream(for: device, fromNow: false, force: true)
         }
+        return true
     }
 
     func clearLogs(serial: String) async {
@@ -719,6 +751,36 @@ final class DeviceStore {
         } catch {
             return (devices.filter { $0.platform == .ios }, error.localizedDescription)
         }
+    }
+
+    private static func loadFilters(from defaults: UserDefaults) -> (texts: [DevicePlatform: String], flags: [DevicePlatform: Bool]) {
+        let legacyText = defaults.string(forKey: filterKey) ?? ""
+        let legacyRegex = defaults.bool(forKey: filterRegexKey)
+        var texts: [DevicePlatform: String] = [:]
+        var flags: [DevicePlatform: Bool] = [:]
+        for item in DevicePlatform.allCases {
+            let textKey = filterTextKey(item)
+            let regexKey = filterUsesRegexKey(item)
+            if defaults.object(forKey: textKey) == nil {
+                defaults.set(legacyText, forKey: textKey)
+                defaults.set(legacyRegex, forKey: regexKey)
+            }
+            texts[item] = defaults.string(forKey: textKey) ?? ""
+            flags[item] = defaults.bool(forKey: regexKey)
+        }
+        return (texts, flags)
+    }
+
+    @discardableResult
+    private func syncActiveFilter() -> Bool {
+        let text = filtersByPlatform[platform] ?? ""
+        let usesRegex = filterUsesRegexByPlatform[platform] ?? false
+        let changed = text != filter || usesRegex != filterUsesRegex
+        filter = text
+        filterUsesRegex = usesRegex
+        appliedLogcatExpression = LogcatFilter.expression(for: text, usesRegex: usesRegex)
+        filterRegex = Self.compiledFilter(text, usesRegex: usesRegex)
+        return changed
     }
 
     private func resumeVisibleStreams(fromNow: Bool) async {
