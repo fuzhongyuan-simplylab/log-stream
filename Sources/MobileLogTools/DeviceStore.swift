@@ -91,6 +91,10 @@ final class DeviceStore {
     private var appliedLogcatExpression: String?
     private var filterRegex: NSRegularExpression?
     private var filterGeneration = 0
+    /// logcat 一条记录里的换行会被拆开。续行没有时间戳，先拼回原记录再过滤。
+    private var openAndroidEntry: [String: String] = [:]
+    private var openAndroidEntryFlush: [String: Task<Void, Never>] = [:]
+    private static let androidLogHeader = #/^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [VDIWEF]\//#
 
     private static let filterKey = "logFilter"
     private static let filterRegexKey = "logFilterUsesRegex"
@@ -510,6 +514,7 @@ final class DeviceStore {
     }
 
     private func clearStoredLog(_ serial: String) {
+        discardOpenAndroidEntry(serial)
         var snapshot = logs[serial] ?? LogSnapshot()
         snapshot.clear()
         logs[serial] = snapshot
@@ -529,6 +534,7 @@ final class DeviceStore {
 
     private func pauseRecording(serial: String) {
         paused.insert(serial)
+        flushOpenAndroidEntry(serial)
         streams[serial]?.discardPending()
         iosStreams[serial]?.discardPending()
         stopStream(serial: serial, intentional: true)
@@ -536,11 +542,70 @@ final class DeviceStore {
 
     private func append(serial: String, newLines: [String]) {
         guard !paused.contains(serial) else { return }
+        if devices.first(where: { $0.serial == serial })?.platform == .android {
+            appendAndroid(serial: serial, newLines: newLines)
+            return
+        }
         let accepted = newLines.filter { matches($0) }
         guard !accepted.isEmpty else { return }
         var snapshot = logs[serial] ?? LogSnapshot()
         snapshot.append(accepted)
         logs[serial] = snapshot
+    }
+
+    /// `logcat -v time` 的新记录以 `MM-DD HH:MM:SS.mmm L/` 开头。没有这个前缀的行是上一条的续行。
+    private static func isAndroidLogHeader(_ line: String) -> Bool {
+        line.starts(with: androidLogHeader)
+    }
+
+    private func appendAndroid(serial: String, newLines: [String]) {
+        var ready: [String] = []
+        var current = openAndroidEntry[serial]
+        for line in newLines {
+            if Self.isAndroidLogHeader(line) {
+                if let current {
+                    ready.append(current)
+                }
+                current = line
+            } else if let existing = current {
+                current = existing + "\n" + line
+            } else {
+                current = line
+            }
+        }
+        openAndroidEntry[serial] = current
+        commitAndroid(serial: serial, entries: ready)
+        scheduleAndroidEntryFlush(serial)
+    }
+
+    private func commitAndroid(serial: String, entries: [String]) {
+        let accepted = entries.filter { matches($0) }
+        guard !accepted.isEmpty else { return }
+        var snapshot = logs[serial] ?? LogSnapshot()
+        snapshot.append(accepted)
+        logs[serial] = snapshot
+    }
+
+    private func scheduleAndroidEntryFlush(_ serial: String) {
+        openAndroidEntryFlush[serial]?.cancel()
+        openAndroidEntryFlush[serial] = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled else { return }
+            flushOpenAndroidEntry(serial)
+        }
+    }
+
+    private func flushOpenAndroidEntry(_ serial: String) {
+        openAndroidEntryFlush[serial]?.cancel()
+        openAndroidEntryFlush[serial] = nil
+        guard let entry = openAndroidEntry.removeValue(forKey: serial) else { return }
+        commitAndroid(serial: serial, entries: [entry])
+    }
+
+    private func discardOpenAndroidEntry(_ serial: String) {
+        openAndroidEntryFlush[serial]?.cancel()
+        openAndroidEntryFlush[serial] = nil
+        openAndroidEntry[serial] = nil
     }
 
     private func startStream(for device: Device, fromNow: Bool, force: Bool = false) async {
