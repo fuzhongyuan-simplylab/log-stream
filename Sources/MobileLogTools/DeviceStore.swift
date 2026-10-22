@@ -91,10 +91,11 @@ final class DeviceStore {
     private var appliedLogcatExpression: String?
     private var filterRegex: NSRegularExpression?
     private var filterGeneration = 0
-    /// logcat 一条记录里的换行会被拆开。续行没有时间戳，先拼回原记录再过滤。
+    /// logcat 把一条消息里的换行拆成多条记录，续行仍带同样的时间戳。先拼回原记录再过滤。
     private var openAndroidEntry: [String: String] = [:]
+    private var openAndroidIdentity: [String: String] = [:]
     private var openAndroidEntryFlush: [String: Task<Void, Never>] = [:]
-    private static let androidLogHeader = #/^\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [VDIWEF]\//#
+    private static let androidLogLine = #/^(\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} [VDIWEF]\/.+?\(\s*\d+\)): ?(.*)$/#
 
     private static let filterKey = "logFilter"
     private static let filterRegexKey = "logFilterUsesRegex"
@@ -553,27 +554,38 @@ final class DeviceStore {
         logs[serial] = snapshot
     }
 
-    /// `logcat -v time` 的新记录以 `MM-DD HH:MM:SS.mmm L/` 开头。没有这个前缀的行是上一条的续行。
-    private static func isAndroidLogHeader(_ line: String) -> Bool {
-        line.starts(with: androidLogHeader)
+    /// 时间、级别、标签和进程相同，且正文以空白开头，是被拆开的上一行。
+    private static func parseAndroidLogLine(_ line: String) -> (identity: String, message: String, isContinuation: Bool)? {
+        guard let match = line.wholeMatch(of: androidLogLine) else { return nil }
+        let message = String(match.output.2)
+        let continues = message.isEmpty || message.first?.isWhitespace == true
+        return (String(match.output.1), message, continues)
     }
 
     private func appendAndroid(serial: String, newLines: [String]) {
         var ready: [String] = []
         var current = openAndroidEntry[serial]
+        var identity = openAndroidIdentity[serial]
         for line in newLines {
-            if Self.isAndroidLogHeader(line) {
-                if let current {
-                    ready.append(current)
+            if let parsed = Self.parseAndroidLogLine(line) {
+                if let identity, parsed.identity == identity, parsed.isContinuation, let existing = current {
+                    current = existing + "\n" + parsed.message
+                } else {
+                    if let current {
+                        ready.append(current)
+                    }
+                    current = line
+                    identity = parsed.identity
                 }
-                current = line
             } else if let existing = current {
                 current = existing + "\n" + line
             } else {
                 current = line
+                identity = nil
             }
         }
         openAndroidEntry[serial] = current
+        openAndroidIdentity[serial] = identity
         commitAndroid(serial: serial, entries: ready)
         scheduleAndroidEntryFlush(serial)
     }
@@ -598,6 +610,7 @@ final class DeviceStore {
     private func flushOpenAndroidEntry(_ serial: String) {
         openAndroidEntryFlush[serial]?.cancel()
         openAndroidEntryFlush[serial] = nil
+        openAndroidIdentity[serial] = nil
         guard let entry = openAndroidEntry.removeValue(forKey: serial) else { return }
         commitAndroid(serial: serial, entries: [entry])
     }
@@ -606,6 +619,7 @@ final class DeviceStore {
         openAndroidEntryFlush[serial]?.cancel()
         openAndroidEntryFlush[serial] = nil
         openAndroidEntry[serial] = nil
+        openAndroidIdentity[serial] = nil
     }
 
     private func startStream(for device: Device, fromNow: Bool, force: Bool = false) async {
@@ -636,12 +650,10 @@ final class DeviceStore {
         guard streams[serial] == nil else { return }
 
         streamWarnings[serial] = nil
-        let pattern = LogcatFilter.expression(for: filter, usesRegex: filterUsesRegex)
-        let tail = since ?? (pattern == nil ? "300" : "20000")
-        var arguments = ["-s", serial, "logcat", "-v", "time", "-T", tail]
-        if let pattern {
-            arguments.append(contentsOf: ["-e", pattern])
-        }
+        let hasFilter = !filter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let tail = since ?? (hasFilter ? "20000" : "300")
+        // 过滤放在拼回多行之后。logcat -e 会按单行丢掉没有关键字的续行。
+        let arguments = ["-s", serial, "logcat", "-v", "time", "-T", tail]
         let stream = makeLogStream(serial: serial)
         do {
             try stream.start(executable: client.path, arguments: arguments)
@@ -873,7 +885,7 @@ final class DeviceStore {
         guard usesRegex else { return nil }
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return nil }
-        return try? NSRegularExpression(pattern: needle)
+        return try? NSRegularExpression(pattern: needle, options: [.dotMatchesLineSeparators])
     }
 }
 
