@@ -2,22 +2,108 @@ import AppKit
 import SwiftUI
 
 enum LogSearch {
-    static func ranges(in text: String, query: String, usesRegex: Bool) -> [NSRange] {
+    static func ranges(
+        in text: String,
+        query: String,
+        matchCase: Bool,
+        wholeWord: Bool,
+        usesRegex: Bool
+    ) -> [NSRange] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty, !text.isEmpty else { return [] }
         if usesRegex {
-            guard let regex = try? NSRegularExpression(pattern: needle) else { return [] }
+            guard let regex = expression(query: needle, matchCase: matchCase, wholeWord: wholeWord, usesRegex: true) else {
+                return []
+            }
             let full = NSRange(text.startIndex..., in: text)
             return regex.matches(in: text, range: full).map(\.range).filter { $0.length > 0 }
         }
+        return literalRanges(in: text, needle: needle, matchCase: matchCase, wholeWord: wholeWord)
+    }
+
+    static func isInvalid(query: String, matchCase: Bool, wholeWord: Bool, usesRegex: Bool) -> Bool {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard usesRegex, !needle.isEmpty else { return false }
+        return expression(query: query, matchCase: matchCase, wholeWord: wholeWord, usesRegex: true) == nil
+    }
+
+    /// 纯文本沿用原来的大小写和变音折叠。全词只在模式首尾是单词字符时检查边界，和 VS Code 的 `\b` 一致。
+    private static func literalRanges(
+        in text: String,
+        needle: String,
+        matchCase: Bool,
+        wholeWord: Bool
+    ) -> [NSRange] {
+        var options: String.CompareOptions = []
+        if !matchCase {
+            options.formUnion([.caseInsensitive, .diacriticInsensitive])
+        }
+        let requireLeading = wholeWord && needle.first.map(isASCIIWordCharacter) == true
+        let requireTrailing = wholeWord && needle.last.map(isASCIIWordCharacter) == true
+        let nsText = text as NSString
         var ranges: [NSRange] = []
         var start = text.startIndex
         while start < text.endIndex,
-              let found = text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive], range: start..<text.endIndex) {
-            ranges.append(NSRange(found, in: text))
+              let found = text.range(of: needle, options: options, range: start..<text.endIndex) {
+            let range = NSRange(found, in: text)
+            let leadingOK = !requireLeading || range.location == 0 || !isASCIIWordUnit(nsText.character(at: range.location - 1))
+            let trailingIndex = NSMaxRange(range)
+            let trailingOK = !requireTrailing || trailingIndex >= nsText.length || !isASCIIWordUnit(nsText.character(at: trailingIndex))
+            if leadingOK && trailingOK {
+                ranges.append(range)
+            }
             start = found.upperBound
         }
         return ranges
+    }
+
+    private static func expression(
+        query: String,
+        matchCase: Bool,
+        wholeWord: Bool,
+        usesRegex: Bool
+    ) -> NSRegularExpression? {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return nil }
+        var pattern = usesRegex ? needle : NSRegularExpression.escapedPattern(for: needle)
+        if wholeWord {
+            pattern = applyingWholeWord(to: pattern)
+        }
+        var options: NSRegularExpression.Options = []
+        if !matchCase {
+            options.insert(.caseInsensitive)
+        }
+        return try? NSRegularExpression(pattern: pattern, options: options)
+    }
+
+    /// VS Code 的全词：模式首尾如果是 `[A-Za-z0-9_]`，就补上 ASCII `\b`。
+    private static func applyingWholeWord(to pattern: String) -> String {
+        var pattern = pattern
+        if let first = pattern.first, isASCIIWordCharacter(first) {
+            pattern = "\\b" + pattern
+        }
+        if let last = pattern.last, isASCIIWordCharacter(last) {
+            pattern += "\\b"
+        }
+        return pattern
+    }
+
+    private static func isASCIIWordCharacter(_ character: Character) -> Bool {
+        guard character.unicodeScalars.count == 1,
+              let value = character.unicodeScalars.first?.value,
+              value < 128 else {
+            return false
+        }
+        return isASCIIWordUnit(unichar(value))
+    }
+
+    private static func isASCIIWordUnit(_ unit: unichar) -> Bool {
+        switch unit {
+        case 48...57, 65...90, 97...122, 95:
+            return true
+        default:
+            return false
+        }
     }
 
     /// 离字符位置最近的一条匹配。点在匹配中间时就是这一条。
@@ -46,15 +132,40 @@ enum LogSearch {
     }
 }
 
+@MainActor
+final class LogEditorBridge {
+    weak var textView: NSTextView?
+
+    func singleLineSelection() -> String? {
+        guard let textView else { return nil }
+        let range = textView.selectedRange()
+        guard range.length > 0 else { return nil }
+        let nsString = textView.string as NSString
+        guard NSMaxRange(range) <= nsString.length else { return nil }
+        let selected = nsString.substring(with: range)
+        guard !selected.isEmpty, selected.allSatisfy({ !$0.isNewline }) else { return nil }
+        return selected
+    }
+
+    func focus() {
+        guard let textView, let window = textView.window else { return }
+        window.makeFirstResponder(textView)
+    }
+}
+
 struct LogTextView: NSViewRepresentable {
     var snapshot: LogSnapshot
     var isLive: Bool
     var onLiveChange: (Bool) -> Void
     var searchQuery: String
+    var searchMatchCase: Bool
+    var searchWholeWord: Bool
     var searchUsesRegex: Bool
+    var searchEpoch: Int
     var searchMatchIndex: Int
     var searchScrollToken: Int
-    var onMatchCount: (Int) -> Void
+    var editorBridge: LogEditorBridge
+    var onMatchCount: (Int, Int) -> Void
     var onBecomeFirstResponder: () -> Void
     var onSelectMatch: (Int) -> Void
     var onHighlightMatch: (Int) -> Void
@@ -122,6 +233,7 @@ struct LogTextView: NSViewRepresentable {
                 onBecomeFirstResponder()
             }
         }
+        editorBridge.textView = textView
         scrollView.onSelectMatch = onSelectMatch
         scrollView.onHighlightMatch = onHighlightMatch
         scrollView.installMatchScroller()
@@ -134,12 +246,19 @@ struct LogTextView: NSViewRepresentable {
 
         let change = coordinator.change(for: snapshot)
         let becameLive = isLive && !coordinator.wasLive
-        let queryChanged = coordinator.query != searchQuery || coordinator.usesRegex != searchUsesRegex
+        let queryChanged = coordinator.query != searchQuery
+            || coordinator.matchCase != searchMatchCase
+            || coordinator.wholeWord != searchWholeWord
+            || coordinator.usesRegex != searchUsesRegex
+            || coordinator.epoch != searchEpoch
         let indexChanged = coordinator.matchIndex != searchMatchIndex
         let shouldReveal = coordinator.scrollToken != searchScrollToken
         coordinator.wasLive = isLive
         coordinator.query = searchQuery
+        coordinator.matchCase = searchMatchCase
+        coordinator.wholeWord = searchWholeWord
         coordinator.usesRegex = searchUsesRegex
+        coordinator.epoch = searchEpoch
         coordinator.matchIndex = searchMatchIndex
         guard change != .none || becameLive || queryChanged || indexChanged || shouldReveal else {
             if isLive {
@@ -198,11 +317,13 @@ struct LogTextView: NSViewRepresentable {
 
     private func publishMatches(_ textView: NSTextView, scrollView: LogScrollView, coordinator: Coordinator) {
         let matchCount = applySearchHighlights(textView, scrollView: scrollView)
-        guard coordinator.reportedCount != matchCount else { return }
+        guard coordinator.reportedCount != matchCount || coordinator.reportedEpoch != searchEpoch else { return }
         coordinator.reportedCount = matchCount
+        coordinator.reportedEpoch = searchEpoch
+        let epoch = searchEpoch
         let report = onMatchCount
         DispatchQueue.main.async {
-            report(matchCount)
+            report(matchCount, epoch)
         }
     }
 
@@ -212,10 +333,14 @@ struct LogTextView: NSViewRepresentable {
         var count = 0
         var wasLive = true
         var query = ""
+        var matchCase = false
+        var wholeWord = false
         var usesRegex = false
+        var epoch = 0
         var matchIndex = -1
         var scrollToken = 0
         var reportedCount = 0
+        var reportedEpoch = -1
         var onBecomeFirstResponder: (() -> Void)?
         let font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
         var attributes: [NSAttributedString.Key: Any] {
@@ -323,7 +448,13 @@ struct LogTextView: NSViewRepresentable {
         guard let storage = textView.textStorage else { return 0 }
         let full = NSRange(location: 0, length: storage.length)
         storage.removeAttribute(.backgroundColor, range: full)
-        let ranges = LogSearch.ranges(in: textView.string, query: searchQuery, usesRegex: searchUsesRegex)
+        let ranges = LogSearch.ranges(
+            in: textView.string,
+            query: searchQuery,
+            matchCase: searchMatchCase,
+            wholeWord: searchWholeWord,
+            usesRegex: searchUsesRegex
+        )
         guard !ranges.isEmpty else {
             scrollView.updateMatchMarks(ranges: [], currentIndex: -1)
             return 0
@@ -339,7 +470,13 @@ struct LogTextView: NSViewRepresentable {
     }
 
     private func revealCurrentMatch(_ textView: NSTextView, scrollView: LogScrollView) {
-        let ranges = LogSearch.ranges(in: textView.string, query: searchQuery, usesRegex: searchUsesRegex)
+        let ranges = LogSearch.ranges(
+            in: textView.string,
+            query: searchQuery,
+            matchCase: searchMatchCase,
+            wholeWord: searchWholeWord,
+            usesRegex: searchUsesRegex
+        )
         guard ranges.indices.contains(searchMatchIndex) else { return }
         scrollView.programmaticScroll = true
         textView.scrollRangeToVisible(ranges[searchMatchIndex])

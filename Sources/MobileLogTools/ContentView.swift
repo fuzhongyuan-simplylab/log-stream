@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum SidebarItem: Hashable {
@@ -585,17 +586,29 @@ struct ContentView: View {
     }
 }
 
+private enum PendingFind {
+    case next
+    case previous
+}
+
 private struct DevicePane: View {
     @Environment(DeviceStore.self) private var store
     @Environment(LogFindFocus.self) private var findFocus
-    @FocusState private var searchFocused: Bool
     @State private var searchVisible = false
     @State private var searchText = ""
     @State private var appliedSearchText = ""
+    @State private var searchMatchCase = false
+    @State private var searchWholeWord = false
     @State private var searchUsesRegex = false
     @State private var matchCount = 0
     @State private var matchIndex = 0
     @State private var searchScrollToken = 0
+    @State private var searchEpoch = 0
+    @State private var matchedEpoch = -1
+    @State private var searchFieldFocused = false
+    @State private var searchSelectToken = 0
+    @State private var pendingFind: PendingFind?
+    @State private var editorBridge = LogEditorBridge()
     let device: Device
 
     var body: some View {
@@ -666,16 +679,44 @@ private struct DevicePane: View {
                     isLive: store.isLive(device.serial),
                     onLiveChange: { store.setLive(device.serial, $0) },
                     searchQuery: searchVisible ? appliedSearchText : "",
+                    searchMatchCase: searchMatchCase,
+                    searchWholeWord: searchWholeWord,
                     searchUsesRegex: searchUsesRegex,
+                    searchEpoch: searchEpoch,
                     searchMatchIndex: matchCount == 0 ? -1 : min(matchIndex, matchCount) - 1,
                     searchScrollToken: searchScrollToken,
-                    onMatchCount: { count in
+                    editorBridge: editorBridge,
+                    onMatchCount: { count, epoch in
+                        guard epoch == searchEpoch else { return }
+                        matchedEpoch = epoch
                         guard searchVisible else {
                             if matchCount != 0 { matchCount = 0 }
                             return
                         }
-                        guard count != matchCount else { return }
                         matchCount = count
+                        if let pending = pendingFind {
+                            pendingFind = nil
+                            guard count > 0 else {
+                                matchIndex = 0
+                                return
+                            }
+                            switch pending {
+                            case .next:
+                                if matchIndex <= 0 || matchIndex > count {
+                                    matchIndex = 1
+                                } else {
+                                    matchIndex = matchIndex >= count ? 1 : matchIndex + 1
+                                }
+                            case .previous:
+                                if matchIndex <= 0 || matchIndex > count {
+                                    matchIndex = count
+                                } else {
+                                    matchIndex = matchIndex <= 1 ? count : matchIndex - 1
+                                }
+                            }
+                            searchScrollToken += 1
+                            return
+                        }
                         if count == 0 {
                             matchIndex = 0
                         } else if matchIndex == 0 || matchIndex > count {
@@ -714,37 +755,32 @@ private struct DevicePane: View {
                     findFocus.serial = device.serial
                 }
             }
-            .onChange(of: searchFocused) { _, focused in
-                if focused {
-                    findFocus.serial = device.serial
-                }
-            }
             .task(id: searchText) {
                 try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled, searchVisible else { return }
+                guard !Task.isCancelled, searchVisible, appliedSearchText != searchText else { return }
+                searchEpoch += 1
                 appliedSearchText = searchText
             }
             .onChange(of: appliedSearchText) { _, _ in
-                guard searchVisible else { return }
+                guard searchVisible, pendingFind == nil else { return }
                 matchIndex = appliedSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0 : 1
                 searchScrollToken += 1
             }
-            .onChange(of: searchUsesRegex) { _, _ in
-                guard searchVisible, !trimmedSearch.isEmpty else { return }
-                if appliedSearchText != searchText {
-                    appliedSearchText = searchText
-                } else {
-                    matchIndex = 1
-                    searchScrollToken += 1
-                }
-            }
             .background {
                 if isFindTarget {
-                    Button(action: toggleSearch) {}
-                        .keyboardShortcut("f", modifiers: .command)
-                        .opacity(0)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
+                    hiddenShortcut("f", action: openSearch)
+                    hiddenShortcut("g", action: findNextFromShortcut)
+                    hiddenShortcut("g", modifiers: [.command, .shift], action: findPreviousFromShortcut)
+                    if searchVisible {
+                        hiddenShortcut("c", modifiers: [.command, .option], action: toggleMatchCase)
+                        hiddenShortcut("w", modifiers: [.command, .option], action: toggleWholeWord)
+                        hiddenShortcut("r", modifiers: [.command, .option], action: toggleRegex)
+                        Button(action: closeSearch) {}
+                            .keyboardShortcut(.cancelAction)
+                            .opacity(0)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
                 }
             }
         }
@@ -752,57 +788,49 @@ private struct DevicePane: View {
     }
 
     private var searchPanel: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                TextField("搜索", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .controlSize(.small)
-                    .focused($searchFocused)
-                    .help(searchUsesRegex ? "正则模式，区分大小写" : "文本模式，不区分大小写")
-                    .onSubmit { showNextMatch() }
-                    .onExitCommand { closeSearch() }
-                Button {
-                    searchUsesRegex.toggle()
-                } label: {
-                    Image(systemName: "chevron.left.forwardslash.chevron.right")
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .foregroundStyle(searchUsesRegex ? Color.accentColor : Color.secondary)
-                .help(searchUsesRegex ? "正则模式已开启，区分大小写" : "文本模式。点此改用正则")
-                .accessibilityLabel("正则")
-            }
-            HStack(spacing: 6) {
-                if !trimmedSearch.isEmpty {
-                    if searchRegexInvalid {
-                        Text("正则不合法")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    } else {
-                        Text("\(displayedMatchIndex)/\(matchCount)")
-                            .font(.caption)
-                            .monospacedDigit()
-                            .foregroundStyle(.secondary)
-                            .help("当前匹配 / 匹配总数")
-                    }
-                }
-                Spacer(minLength: 12)
-                findButton(
-                    "上一个",
-                    shortcut: KeyboardShortcut("g", modifiers: [.command, .shift]),
-                    help: "跳到当前选中匹配的上一条",
-                    action: showPreviousMatch
+        HStack(spacing: 4) {
+            HStack(spacing: 1) {
+                FindTextField(
+                    text: $searchText,
+                    isFocused: searchFieldFocused,
+                    selectAllToken: searchSelectToken,
+                    onFocus: { findFocus.serial = device.serial },
+                    onSubmit: showNextMatch,
+                    onShiftSubmit: showPreviousMatch,
+                    onCancel: closeSearch
                 )
-                findButton(
-                    "下一个",
-                    shortcut: KeyboardShortcut("g", modifiers: .command),
-                    help: "跳到当前选中匹配的下一条",
-                    action: showNextMatch
-                )
+                .frame(minWidth: 88, idealWidth: 120, maxWidth: 160)
+                searchOption("Aa", isOn: searchMatchCase, help: "区分大小写（⌥⌘C）", action: toggleMatchCase)
+                searchOption("ab", isOn: searchWholeWord, help: "全词匹配（⌥⌘W）", action: toggleWholeWord)
+                searchOption(".*", isOn: searchUsesRegex, help: "使用正则表达式（⌥⌘R）", action: toggleRegex)
             }
+            .padding(.leading, 6)
+            .padding(.trailing, 3)
+            .padding(.vertical, 2)
+            .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+            .overlay {
+                RoundedRectangle(cornerRadius: 5)
+                    .strokeBorder(searchFieldIsError ? Color.red : Color(nsColor: .separatorColor), lineWidth: 1)
+            }
+
+            if let status = searchStatus {
+                Text(status.label)
+                    .font(.caption)
+                    .foregroundStyle(status.isError ? Color.red : Color.secondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .fixedSize()
+                    .help(status.help)
+            }
+
+            searchIconButton("chevron.up", label: "上一个", help: "上一个匹配（⇧⌘G）", action: showPreviousMatch)
+                .disabled(matchCount == 0 || searchRegexInvalid)
+            searchIconButton("chevron.down", label: "下一个", help: "下一个匹配（⌘G）", action: showNextMatch)
+                .disabled(matchCount == 0 || searchRegexInvalid)
+            searchIconButton("xmark", label: "关闭", help: "关闭（Escape）", action: closeSearch)
         }
-        .padding(8)
-        .frame(width: 280)
+        .padding(6)
+        .fixedSize(horizontal: true, vertical: true)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay {
             RoundedRectangle(cornerRadius: 8)
@@ -816,26 +844,30 @@ private struct DevicePane: View {
     }
 
     private var searchRegexInvalid: Bool {
-        guard searchUsesRegex, !trimmedSearch.isEmpty else { return false }
-        return (try? NSRegularExpression(pattern: trimmedSearch)) == nil
+        LogSearch.isInvalid(
+            query: searchText,
+            matchCase: searchMatchCase,
+            wholeWord: searchWholeWord,
+            usesRegex: searchUsesRegex
+        )
     }
 
-    private func closeSearch() {
-        searchVisible = false
-        searchFocused = false
+    private var searchFieldIsError: Bool {
+        guard !trimmedSearch.isEmpty else { return false }
+        if searchRegexInvalid { return true }
+        return appliedSearchText == searchText && matchedEpoch == searchEpoch && matchCount == 0
     }
 
-    private func toggleSearch() {
-        findFocus.serial = device.serial
-        searchVisible.toggle()
-        guard searchVisible else { return }
-        if appliedSearchText != searchText {
-            appliedSearchText = searchText
-        } else if !trimmedSearch.isEmpty {
-            if matchIndex == 0 { matchIndex = 1 }
-            searchScrollToken += 1
+    private var searchStatus: (label: String, isError: Bool, help: String)? {
+        guard !trimmedSearch.isEmpty else { return nil }
+        if searchRegexInvalid {
+            return ("正则不合法", true, "正则表达式无法编译")
         }
-        DispatchQueue.main.async { searchFocused = true }
+        guard appliedSearchText == searchText, matchedEpoch == searchEpoch else { return nil }
+        if matchCount == 0 {
+            return ("无结果", true, "没有匹配")
+        }
+        return ("\(displayedMatchIndex)/\(matchCount)", false, "当前匹配 / 匹配总数")
     }
 
     private var displayedMatchIndex: Int {
@@ -847,24 +879,143 @@ private struct DevicePane: View {
         findFocus.serial == device.serial
     }
 
-    private func findButton(
+    private func searchOption(
         _ title: String,
-        shortcut: KeyboardShortcut,
+        isOn: Bool,
         help: String,
         action: @escaping () -> Void
     ) -> some View {
-        Group {
-            if isFindTarget {
-                Button(title, action: action)
-                    .keyboardShortcut(shortcut)
-                    .help(help)
-            } else {
-                Button(title, action: action)
-                    .help(help)
-            }
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .frame(minWidth: 18)
         }
-        .controlSize(.small)
-        .disabled(matchCount == 0)
+        .buttonStyle(.borderless)
+        .foregroundStyle(isOn ? Color.accentColor : Color.secondary)
+        .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private func searchIconButton(
+        _ systemName: String,
+        label: String,
+        help: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 11, weight: .semibold))
+                .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+        .accessibilityLabel(label)
+    }
+
+    private func hiddenShortcut(
+        _ key: KeyEquivalent,
+        modifiers: EventModifiers = .command,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {}
+            .keyboardShortcut(key, modifiers: modifiers)
+            .opacity(0)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private func closeSearch() {
+        guard searchVisible else { return }
+        pendingFind = nil
+        searchEpoch += 1
+        searchVisible = false
+        searchFieldFocused = false
+        DispatchQueue.main.async {
+            editorBridge.focus()
+        }
+    }
+
+    private func openSearch() {
+        findFocus.serial = device.serial
+        if let selection = editorBridge.singleLineSelection() {
+            searchText = selection
+        }
+        pendingFind = nil
+        searchVisible = true
+        searchEpoch += 1
+        if appliedSearchText != searchText {
+            appliedSearchText = searchText
+        } else if !trimmedSearch.isEmpty {
+            if matchIndex == 0 { matchIndex = 1 }
+            searchScrollToken += 1
+        }
+        searchSelectToken += 1
+        searchFieldFocused = true
+    }
+
+    private func findNextFromShortcut() {
+        findFocus.serial = device.serial
+        if searchVisible, appliedSearchText == searchText, pendingFind == nil, matchedEpoch == searchEpoch {
+            showNextMatch()
+            return
+        }
+        beginNavigation(.next)
+    }
+
+    private func findPreviousFromShortcut() {
+        findFocus.serial = device.serial
+        if searchVisible, appliedSearchText == searchText, pendingFind == nil, matchedEpoch == searchEpoch {
+            showPreviousMatch()
+            return
+        }
+        beginNavigation(.previous)
+    }
+
+    private func beginNavigation(_ direction: PendingFind) {
+        let wasVisible = searchVisible
+        searchVisible = true
+        searchFieldFocused = false
+        guard !trimmedSearch.isEmpty, !searchRegexInvalid else {
+            pendingFind = nil
+            return
+        }
+        pendingFind = direction
+        if appliedSearchText != searchText {
+            matchIndex = 0
+            searchEpoch += 1
+            appliedSearchText = searchText
+            return
+        }
+        if !wasVisible {
+            searchEpoch += 1
+        }
+    }
+
+    private func toggleMatchCase() {
+        searchMatchCase.toggle()
+        applySearchOptions()
+    }
+
+    private func toggleWholeWord() {
+        searchWholeWord.toggle()
+        applySearchOptions()
+    }
+
+    private func toggleRegex() {
+        searchUsesRegex.toggle()
+        applySearchOptions()
+    }
+
+    private func applySearchOptions() {
+        guard searchVisible, !trimmedSearch.isEmpty else { return }
+        pendingFind = nil
+        searchEpoch += 1
+        if appliedSearchText != searchText {
+            appliedSearchText = searchText
+        } else {
+            matchIndex = 1
+            searchScrollToken += 1
+        }
     }
 
     private func showNextMatch() {
@@ -921,6 +1072,115 @@ private struct DevicePane: View {
             return "已暂停"
         }
         return "等待日志…"
+    }
+}
+
+private struct FindTextField: NSViewRepresentable {
+    @Binding var text: String
+    var isFocused: Bool
+    var selectAllToken: Int
+    var onFocus: () -> Void
+    var onSubmit: () -> Void
+    var onShiftSubmit: () -> Void
+    var onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(string: text)
+        field.delegate = context.coordinator
+        field.isBordered = false
+        field.isBezeled = false
+        field.drawsBackground = false
+        field.focusRingType = .none
+        field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        field.placeholderString = "搜索"
+        field.maximumNumberOfLines = 1
+        field.lineBreakMode = .byTruncatingTail
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        if let cell = field.cell as? NSTextFieldCell {
+            cell.sendsActionOnEndEditing = false
+            cell.isScrollable = true
+            cell.wraps = false
+            cell.usesSingleLineMode = true
+        }
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        context.coordinator.parent = self
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        let token = selectAllToken
+        guard isFocused, context.coordinator.appliedSelectToken != token else {
+            if !isFocused {
+                context.coordinator.wantsFocus = false
+            }
+            return
+        }
+        context.coordinator.wantsFocus = true
+        DispatchQueue.main.async {
+            guard context.coordinator.wantsFocus, context.coordinator.parent.selectAllToken == token else { return }
+            guard let window = field.window else { return }
+            context.coordinator.applyingFocus = true
+            window.makeFirstResponder(field)
+            context.coordinator.applyingFocus = false
+            guard let editor = field.currentEditor(), context.coordinator.wantsFocus else { return }
+            editor.selectAll(nil)
+            context.coordinator.appliedSelectToken = token
+        }
+    }
+
+    final class Coordinator: NSObject, NSTextFieldDelegate {
+        var parent: FindTextField
+        var appliedSelectToken = -1
+        var wantsFocus = false
+        var applyingFocus = false
+
+        init(_ parent: FindTextField) {
+            self.parent = parent
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSTextField else { return }
+            if parent.text != field.stringValue {
+                parent.text = field.stringValue
+            }
+        }
+
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            parent.onFocus()
+        }
+
+        func controlTextDidEndEditing(_ notification: Notification) {
+            if !applyingFocus {
+                wantsFocus = false
+            }
+        }
+
+        func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if NSApp.currentEvent?.modifierFlags.contains(.shift) == true {
+                    parent.onShiftSubmit()
+                } else {
+                    parent.onSubmit()
+                }
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertLineBreak(_:)) {
+                parent.onShiftSubmit()
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                parent.onCancel()
+                return true
+            }
+            return false
+        }
     }
 }
 
